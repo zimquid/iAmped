@@ -17,6 +17,10 @@ const fmtTotal = (ms) => {
 };
 const stars = (r) => r ? "★".repeat(Math.round(r / 2)) : "";
 const esc = (s) => (s || "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+const BITRATE_PRESETS = {
+  aac: [64, 96, 128, 160, 192, 256],
+  mp3: [96, 128, 160, 192, 256, 320],
+};
 
 async function api(path, method = "GET", body = null) {
   const opt = { method, headers: { "Content-Type": "application/json" } };
@@ -55,6 +59,13 @@ const STATE = {
   currentDevice: null,
   visualizer: null,
   visualizerEnabled: false,
+  playbackOffset: 0,
+  bitrateByFormat: { aac: 256, mp3: 320 },
+  manualPlaylistIds: null,
+  transferMaxTracks: null,
+  transferTitle: "",
+  pendingTransferPlan: null,
+  draggedPlaylist: null,
 };
 
 const fmtClock = (sec) => {
@@ -78,9 +89,9 @@ function lcd(main, sub, frac) {
 function scrub(frac, elapsed, dur) {
   const row = $("lcd-progrow");
   row.classList.remove("hidden"); row.classList.add("with-time");
-  $("lcd-prog").firstElementChild.style.width = `${Math.min(100, (frac || 0) * 100)}%`;
+  $("lcd-prog").firstElementChild.style.width = `${Math.min(100, Math.max(0, (frac || 0) * 100))}%`;
   $("lcd-elapsed").textContent = fmtClock(elapsed || 0);
-  $("lcd-remain").textContent = "-" + fmtClock(dur ? dur - (elapsed || 0) : 0);
+  $("lcd-remain").textContent = "-" + fmtClock(dur ? Math.max(0, dur - (elapsed || 0)) : 0);
 }
 function bottomBrowse() {
   $("bottom-info").classList.remove("hidden");
@@ -115,11 +126,10 @@ function setSyncProgress(label, done, total) {
 
 // ---- panes --------------------------------------------------------------
 function selectPane(paneId, srcEl) {
-  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === paneId));
+  document.querySelectorAll(".content > .pane").forEach((p) => p.classList.toggle("active", p.id === paneId));
   document.querySelectorAll(".src-item").forEach((s) => s.classList.remove("selected"));
   if (srcEl) srcEl.classList.add("selected");
-  if (paneId === "pane-device") bottomDevice();
-  else if (paneId === "pane-browse") bottomBrowse();
+  if (paneId === "pane-browse") bottomBrowse();
   else { $("bottom-info").classList.remove("hidden"); $("capacity").classList.add("hidden"); $("cap-legend").classList.add("hidden"); $("sync-actions").classList.add("hidden"); $("bottom-info").textContent = "—"; }
 }
 document.querySelectorAll(".src-item[data-pane]").forEach((el) => { el.onclick = () => selectPane(el.dataset.pane, el); });
@@ -131,6 +141,8 @@ async function loadConfig() {
   $("device-path").value = cfg.last_device_path || ""; $("reserve").value = cfg.reserve_mb ?? 200;
   $("strategy").value = cfg.fill_strategy || "most_played";
   $("transcode").checked = cfg.transcode_lossless !== false;
+  STATE.bitrateByFormat.aac = Number(cfg.aac_bitrate_k) || 256;
+  STATE.bitrateByFormat.mp3 = Number(cfg.mp3_bitrate_k) || 320;
   $("mirror").checked = cfg.mirror !== false;
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   toggleDeviceType();
@@ -156,7 +168,7 @@ function showConnected(res) {
   const s = $("connect-status");
   s.className = "status ok";
   s.textContent = `Connected to ${res.server.name} (Plex ${res.server.version}).`;
-  lcd("iAmped", `Connected to ${res.server.name}`);
+  if (STATE.playing < 0) lcd("iAmped", `Connected to ${res.server.name}`);
   $("section").innerHTML = res.sections.map((x) => `<option>${esc(x)}</option>`).join("");
   $("section-wrap").classList.toggle("hidden", res.sections.length === 0);
   $("btn-build").disabled = false;
@@ -267,7 +279,24 @@ async function loadSidebar() {
     list.innerHTML = STATE.playlists.map((p) => `
       <div class="src-item playlist" data-id="${esc(p.id)}" data-title="${esc(p.title)}" data-source="${p.source}">
         ${p.source === "local" && p.kind === "sonic" ? sonicSvg : plSvg}${esc(p.title)}</div>`).join("");
-    list.querySelectorAll(".playlist").forEach((el) => { el.onclick = () => openPlaylist(el); });
+    list.querySelectorAll(".playlist").forEach((el) => {
+      el.onclick = () => openPlaylist(el);
+      el.draggable = true;
+      el.ondragstart = (event) => {
+        STATE.draggedPlaylist = {
+          id: el.dataset.id, title: el.dataset.title,
+        };
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData(
+          "application/x-iamped-playlist", JSON.stringify(STATE.draggedPlaylist));
+        event.dataTransfer.setData("text/plain", `iAmped playlist: ${el.dataset.title}`);
+        el.classList.add("dragging");
+      };
+      el.ondragend = () => {
+        el.classList.remove("dragging");
+        STATE.draggedPlaylist = null;
+      };
+    });
   }
   renderSyncChecklist();
   await loadDevices();
@@ -302,13 +331,21 @@ async function loadDevices() {
       selectDevice(el);
     };
     el.ondragover = (event) => {
-      if (!STATE.selected.size) return;
+      const types = [...(event.dataTransfer?.types || [])];
+      if (!STATE.selected.size && !STATE.draggedPlaylist
+          && !types.includes("application/x-iamped-playlist")) return;
       event.preventDefault(); el.classList.add("drop-target");
     };
     el.ondragleave = () => el.classList.remove("drop-target");
     el.ondrop = (event) => {
       event.preventDefault(); el.classList.remove("drop-target");
-      dropSelectionOnDevice(el);
+      const rawPlaylist = event.dataTransfer.getData("application/x-iamped-playlist");
+      const playlist = rawPlaylist ? JSON.parse(rawPlaylist) : STATE.draggedPlaylist;
+      if (playlist) {
+        dropPlaylistOnDevice(el, playlist);
+      } else {
+        dropSelectionOnDevice(el);
+      }
     };
   });
   list.querySelectorAll(".device-music").forEach((el) => { el.onclick = () => openDeviceMusic(el); });
@@ -378,6 +415,8 @@ async function openPlaylist(el) {
 function rowHtml(t, i) {
   return `
     <div class="songrow${STATE.selected.has(t.rating_key) ? " selected" : ""}${STATE.playing === i ? " playing" : ""}" data-idx="${i}" data-rk="${esc(t.rating_key)}">
+      <div class="c-check"><input type="checkbox" tabindex="-1" ${STATE.selected.has(t.rating_key) ? "checked" : ""}></div>
+      <div class="c-num">${i + 1}</div>
       <div class="c-play">${STATE.playing === i ? "►" : ""}</div>
       <div class="c-name">${esc(t.title)}${t.lossless ? ' <span class="lossless-tag">FLAC</span>' : ''}</div>
       <div class="c-artist">${esc(t.artist)}</div><div class="c-album">${esc(t.album)}</div>
@@ -524,15 +563,35 @@ async function songRadio(t) {
 
 // ---------------------------------------------------------------- playback
 const player = $("player");
+function currentTrack() {
+  return STATE.playing >= 0 ? STATE.tracks[STATE.playing] : null;
+}
+function trackDuration() {
+  const metadataDuration = Number(currentTrack()?.duration_ms || 0) / 1000;
+  if (metadataDuration > 0) return metadataDuration;
+  return Number.isFinite(player.duration) && player.duration > 0 ? player.duration : 0;
+}
+function playbackPosition() {
+  return Math.min(trackDuration() || Infinity, STATE.playbackOffset + (player.currentTime || 0));
+}
+function updatePlaybackDisplay(position = playbackPosition()) {
+  const duration = trackDuration();
+  scrub(duration ? position / duration : 0, position, duration);
+}
+function streamUrl(t, start = 0) {
+  const base = `/api/stream/${encodeURIComponent(t.rating_key)}`;
+  return start > 0 ? `${base}?start=${encodeURIComponent(start.toFixed(3))}` : base;
+}
 function playIndex(i) {
   if (i < 0 || i >= STATE.tracks.length) return;
   STATE.playing = i;
   const t = STATE.tracks[i];
-  player.src = `/api/stream/${encodeURIComponent(t.rating_key)}`;
+  STATE.playbackOffset = 0;
+  player.src = streamUrl(t);
   player.play().catch(() => {});
   lcd(t.title, `${t.artist} — ${t.album}`);
   $("lcd-prog").classList.add("seekable");
-  scrub(0, 0, 0);
+  updatePlaybackDisplay(0);
   setPlayIcon(true); renderTracks();
 }
 function togglePlay() {
@@ -544,25 +603,54 @@ function setPlayIcon(playing) {
     ? '<svg viewBox="0 0 16 16"><path d="M3 2h4v12H3zM9 2h4v12H9z"/></svg>'
     : '<svg viewBox="0 0 16 16"><path d="M3 2l11 6L3 14z"/></svg>';
 }
-player.ontimeupdate = () => { if (!scrubbing && player.duration) scrub(player.currentTime / player.duration, player.currentTime, player.duration); };
+player.ontimeupdate = () => { if (!scrubbing) updatePlaybackDisplay(); };
+player.onloadedmetadata = () => updatePlaybackDisplay();
+player.ondurationchange = () => updatePlaybackDisplay();
 player.onended = () => playIndex(STATE.playing + 1);
 
 // ---- scrubbing: the LCD progress bar doubles as an iTunes-style seek bar ----
 const prog = $("lcd-prog");
 let scrubbing = false;
+let pendingSeek = null;
 function seekFromEvent(clientX) {
-  if (!player.duration) return;
+  const duration = trackDuration();
+  if (!duration) return;
   const r = prog.getBoundingClientRect();
   const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
-  scrub(frac, frac * player.duration, player.duration);   // move fill + times immediately
-  player.currentTime = frac * player.duration;
+  const target = frac * duration;
+  pendingSeek = target;
+  updatePlaybackDisplay(target);
+}
+
+function commitSeek(target) {
+  if (target == null) return;
+  // Range-capable/native streams can seek in place. A live ffmpeg stream has
+  // an infinite/unknown media duration, so restart it at the requested offset.
+  if (Number.isFinite(player.duration) && player.duration > 0) {
+    const localTarget = target - STATE.playbackOffset;
+    if (localTarget >= 0 && localTarget <= player.duration) {
+      player.currentTime = localTarget;
+      return;
+    }
+  }
+  const t = currentTrack();
+  if (!t) return;
+  const wasPlaying = !player.paused;
+  STATE.playbackOffset = target;
+  player.src = streamUrl(t, target);
+  if (wasPlaying) player.play().catch(() => {});
 }
 prog.addEventListener("mousedown", (e) => {
-  if (STATE.playing < 0 || !player.duration) return;
-  scrubbing = true; seekFromEvent(e.clientX); e.preventDefault();
+  if (STATE.playing < 0 || !trackDuration()) return;
+  scrubbing = true; pendingSeek = null; seekFromEvent(e.clientX); e.preventDefault();
 });
 window.addEventListener("mousemove", (e) => { if (scrubbing) seekFromEvent(e.clientX); });
-window.addEventListener("mouseup", () => { scrubbing = false; });
+window.addEventListener("mouseup", () => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  commitSeek(pendingSeek);
+  pendingSeek = null;
+});
 
 $("t-play").onclick = togglePlay;
 $("t-next").onclick = () => playIndex(STATE.playing + 1);
@@ -646,6 +734,7 @@ $("rp-build").onclick = async () => {
   const body = {
     device_type: [...document.getElementsByName("dtype")].find((r) => r.checked)?.value || "ipod",
     transcode_lossless: $("transcode").checked,
+    target_bitrate_k: STATE.bitrateByFormat[activeFormat()],
   };
   const count = Number($("rp-count").value), mb = Number($("rp-mb").value);
   if (count) body.max_tracks = count;
@@ -683,14 +772,17 @@ document.addEventListener("click", (e) => {
 
 // ---------------------------------------------------------------- device
 async function selectDevice(el) {
-  selectPane("pane-device", el);
+  document.querySelectorAll(".src-item").forEach((s) => s.classList.remove("selected"));
+  el.classList.add("selected");
+  openDeviceInspector();
   const path = el.dataset.path, isIpod = el.dataset.ipod === "true";
   const model = el.dataset.model;
   $("device-path").value = path; $("dev-name-h").textContent = el.dataset.name;
   STATE.currentDevice = {
     path, type: isIpod ? "ipod" : "massstorage", name: el.dataset.name,
   };
-  STATE.manualKeys = null; STATE.review = [];
+  STATE.manualKeys = null; STATE.manualPlaylistIds = null;
+  STATE.transferMaxTracks = null; STATE.review = [];
   $("review-list").innerHTML = "";
   $("review-wrap").classList.add("hidden");
   $("review-actions").classList.add("hidden");
@@ -705,18 +797,62 @@ async function selectDevice(el) {
     if (profile.reserve_mb != null) $("reserve").value = profile.reserve_mb;
     if (profile.fill_strategy) $("strategy").value = profile.fill_strategy;
     if (profile.transcode_lossless != null) $("transcode").checked = profile.transcode_lossless;
+    if (profile.target_bitrate_k) {
+      STATE.bitrateByFormat[isIpod ? "aac" : "mp3"] = Number(profile.target_bitrate_k);
+    }
     if (profile.sync_artwork != null) $("sync-artwork").checked = profile.sync_artwork;
     if (profile.mirror != null) $("mirror").checked = profile.mirror;
     if (profile.name) $("device-name").value = profile.name;
   } catch (_) {}
+  updateBitrateControl();
   await loadBackups();
+}
+
+function openDeviceInspector() {
+  $("pane-device").classList.add("open");
+  $("view-inspector").classList.add("active");
+  bottomDevice();
+}
+function closeDeviceInspector() {
+  $("pane-device").classList.remove("open");
+  $("view-inspector").classList.remove("active");
+  if (document.querySelector(".content > #pane-browse.active")) bottomBrowse();
 }
 function toggleDeviceType() {
   const t = [...document.getElementsByName("dtype")].find((r) => r.checked).value;
   $("ipod-warn").classList.toggle("hidden", t !== "ipod");
   $("devname-wrap").classList.toggle("hidden", t !== "ipod");
+  updateBitrateControl();
 }
 for (const r of document.getElementsByName("dtype")) r.onchange = toggleDeviceType;
+function activeFormat() {
+  return [...document.getElementsByName("dtype")].find((r) => r.checked)?.value === "ipod"
+    ? "aac" : "mp3";
+}
+function setBitrate(format, bitrate) {
+  const values = BITRATE_PRESETS[format];
+  const closest = values.reduce((a, b) =>
+    Math.abs(b - bitrate) < Math.abs(a - bitrate) ? b : a);
+  STATE.bitrateByFormat[format] = closest;
+  if (activeFormat() === format) updateBitrateControl();
+}
+function updateBitrateControl() {
+  const format = activeFormat();
+  const values = BITRATE_PRESETS[format];
+  const current = STATE.bitrateByFormat[format] || values[values.length - 1];
+  const index = Math.max(0, values.indexOf(current));
+  $("bitrate-format").textContent = `${format.toUpperCase()} bitrate`;
+  $("bitrate-value").textContent = `${values[index]} kbps`;
+  $("bitrate-notch").max = String(values.length - 1);
+  $("bitrate-notch").value = String(index);
+  $("bitrate-ticks").innerHTML = values.map((value) => `<span>${value}</span>`).join("");
+}
+$("bitrate-notch").oninput = () => {
+  const format = activeFormat();
+  const value = BITRATE_PRESETS[format][Number($("bitrate-notch").value)];
+  STATE.bitrateByFormat[format] = value;
+  $("bitrate-value").textContent = `${value} kbps`;
+};
 function deviceParams() {
   const t = [...document.getElementsByName("dtype")].find((r) => r.checked).value;
   const p = {
@@ -724,11 +860,19 @@ function deviceParams() {
     device_name: $("device-name").value.trim() || "iPod",
     reserve_mb: Number($("reserve").value) || 0, fill_strategy: $("strategy").value,
     transcode_lossless: $("transcode").checked, playlist_ids: selectedPlaylists(),
+    target_bitrate_k: STATE.bitrateByFormat[t === "ipod" ? "aac" : "mp3"],
     sync_artwork: $("sync-artwork").checked,
     mirror: $("mirror").checked,
   };
   if (STATE.manualKeys) p.mirror = false;
   if (STATE.manualKeys) p.rating_keys = STATE.manualKeys;
+  if (STATE.manualPlaylistIds) {
+    p.mirror = false;
+    p.playlist_ids = STATE.manualPlaylistIds;
+    p.playlist_only = true;
+  }
+  if (STATE.transferMaxTracks) p.max_tracks = STATE.transferMaxTracks;
+  if (STATE.manualKeys || STATE.manualPlaylistIds) p.transfer_request = true;
   if (STATE.review.length) {
     p.review_actions = [...document.querySelectorAll(".review-op:checked")]
       .map((el) => el.value);
@@ -744,7 +888,8 @@ function renderCapacityRaw(total, music, reserve, free) {
     `<span><i class="seg-free"></i>Free ${fmtBytes(free)}</span>`;
 }
 async function plan() {
-  STATE.manualKeys = null;
+  STATE.manualKeys = null; STATE.manualPlaylistIds = null;
+  STATE.transferMaxTracks = null; STATE.transferTitle = "";
   const s = $("sync-status"); s.className = "status"; const p = deviceParams();
   if (!p.device_path) { s.className = "status err"; s.textContent = "Select a device first."; return; }
   $("btn-plan").disabled = true; lcd("Planning", "Choosing tracks that fit…");
@@ -771,11 +916,26 @@ function renderPlan(r) {
     <div class="c-artist">${esc(t.artist)}</div><div class="c-album">${esc(t.album)}</div>
     <div class="c-plays">${t.views || 0}</div><div class="c-time">${fmtBytes(t.size)}</div></div>`).join("");
   $("preview-wrap").classList.remove("hidden");
-  $("review-list").innerHTML = STATE.review.map((item) => `<label class="songrow ${item.action}">
-    <div class="c-check"><input class="review-op" type="checkbox" value="${esc(item.id)}" ${item.checked ? "checked" : ""}></div>
-    <div class="c-action">${esc(item.action)}</div><div class="c-name">${esc(item.title)}</div>
-    <div class="c-artist">${esc(item.artist)}</div><div class="c-album">${esc(item.album)}</div>
-    <div class="c-size">${fmtBytes(item.size)}</div></label>`).join("");
+  const actionMeta = {
+    keep: ["✓", "Keep"], add: ["+", "Add"],
+    update: ["↻", "Update"], remove: ["−", "Remove"],
+  };
+  const grouped = ["keep", "add", "update", "remove"].map((action) => {
+    const items = STATE.review.filter((item) => item.action === action);
+    const count = action === "keep" ? r.keep_count : items.length;
+    const [icon, label] = actionMeta[action];
+    const rows = items.length ? items.map((item, index) => `<label class="songrow ${item.action}${index >= 5 ? " review-extra hidden" : ""}">
+      <div class="c-check"><input class="review-op" type="checkbox" value="${esc(item.id)}" ${item.checked ? "checked" : ""}></div>
+      <div class="c-name">${esc(item.title)}</div><div class="c-artist">${esc(item.artist)}</div>
+      <div class="c-size">${fmtBytes(item.size)}</div></label>`).join("")
+      : `<div class="review-empty">No items to ${action}</div>`;
+    return `<section class="review-group ${action}">
+      <div class="review-group-head"><span class="review-icon">${icon}</span>
+        <b>${label} (${count})</b><span>${action === "remove" ? "—" : "✓"}</span></div>
+      <div class="review-columns"><span>Name</span><span>Artist</span><span>Size</span></div>
+      ${rows}${items.length > 5 ? `<button class="review-more" type="button">and ${items.length - 5} more…</button>` : ""}</section>`;
+  }).join("");
+  $("review-list").innerHTML = grouped;
   const hasReview = STATE.review.length > 0;
   $("review-wrap").classList.toggle("hidden", !hasReview);
   $("review-actions").classList.toggle("hidden", !hasReview);
@@ -788,6 +948,15 @@ function renderPlan(r) {
         && !r.pending_transaction;
     };
   });
+  document.querySelectorAll(".review-more").forEach((button) => {
+    button.onclick = () => {
+      const group = button.closest(".review-group");
+      const extras = [...group.querySelectorAll(".review-extra")];
+      const opening = extras.some((row) => row.classList.contains("hidden"));
+      extras.forEach((row) => row.classList.toggle("hidden", !opening));
+      button.textContent = opening ? "Show fewer" : `and ${extras.length} more…`;
+    };
+  });
 }
 
 async function dropSelectionOnDevice(el) {
@@ -795,18 +964,102 @@ async function dropSelectionOnDevice(el) {
   if (!keys.length) return;
   await selectDevice(el);
   STATE.manualKeys = keys;
+  STATE.manualPlaylistIds = null;
+  STATE.transferMaxTracks = null;
+  STATE.transferTitle = `${keys.length} selected track${keys.length === 1 ? "" : "s"}`;
+  await planDraggedTransfer();
+}
+
+async function dropPlaylistOnDevice(el, playlist) {
+  if (!playlist?.id) return;
+  await selectDevice(el);
+  STATE.manualKeys = null;
+  STATE.manualPlaylistIds = [playlist.id];
+  STATE.transferMaxTracks = null;
+  STATE.transferTitle = playlist.title || "Playlist";
+  await planDraggedTransfer();
+}
+
+async function planDraggedTransfer(offerWizard = true) {
   const s = $("sync-status");
-  s.className = "status"; s.textContent = `Planning ${keys.length} dragged track(s)…`;
-  lcd("Planning drag to device", `${keys.length} selected track(s)`);
+  s.className = "status"; s.textContent = `Planning “${STATE.transferTitle}”…`;
+  lcd("Planning drag to device", STATE.transferTitle);
   try {
     const r = await api("/api/plan", "POST", deviceParams());
     renderPlan(r);
     $("btn-sync").disabled = (r.track_count + r.remove_count) === 0;
-    lcd("iAmped", `${r.add_count} additions, ${r.update_count} updates`);
+    lcd("iAmped", `${r.add_count} additions · ${r.target_bitrate_k} kbps ${r.target_format.toUpperCase()}`);
+    if (offerWizard && r.skipped_for_space > 0) openTransferWizard(r);
   } catch (e) {
     s.className = "status err"; s.textContent = e.message;
   }
 }
+
+function closeTransferWizard() {
+  $("transfer-wizard").classList.add("hidden");
+  STATE.pendingTransferPlan = null;
+}
+
+function openTransferWizard(planResult) {
+  STATE.pendingTransferPlan = planResult;
+  const requested = planResult.requested_track_count || planResult.desired_track_count;
+  $("transfer-wizard-summary").textContent =
+    `“${STATE.transferTitle}” needs ${fmtBytes(planResult.requested_bytes)}, but ${fmtBytes(planResult.budget_bytes)} is available after headroom.`;
+
+  const lowerFits = (planResult.bitrate_options || [])
+    .filter((option) => option.fits && option.bitrate_k < planResult.target_bitrate_k)
+    .sort((a, b) => b.bitrate_k - a.bitrate_k);
+  const bitrateChoice = document.querySelector('input[name="transfer-choice"][value="bitrate"]');
+  const tracksChoice = document.querySelector('input[name="transfer-choice"][value="tracks"]');
+  const bitrateOption = $("transfer-bitrate-option");
+  if (lowerFits.length) {
+    bitrateChoice.disabled = false; bitrateChoice.checked = true;
+    bitrateOption.classList.remove("unavailable");
+    $("transfer-bitrate").disabled = false;
+    $("transfer-bitrate").innerHTML = lowerFits.map((option) =>
+      `<option value="${option.bitrate_k}">${option.bitrate_k} kbps · ${fmtBytes(option.requested_bytes)}</option>`
+    ).join("");
+    $("transfer-bitrate-help").textContent =
+      `${lowerFits[0].bitrate_k} kbps is the highest setting that fits all ${requested} songs.`;
+  } else {
+    bitrateChoice.disabled = true; tracksChoice.checked = true;
+    bitrateOption.classList.add("unavailable");
+    $("transfer-bitrate").disabled = true;
+    const lowest = (planResult.bitrate_options || [])[0];
+    $("transfer-bitrate").innerHTML = lowest
+      ? `<option>${lowest.bitrate_k} kbps</option>` : "<option>No smaller preset</option>";
+    $("transfer-bitrate-help").textContent =
+      lowest ? `Even ${lowest.bitrate_k} kbps fits only ${lowest.fitting_tracks} songs.`
+        : "No lower bitrate is available.";
+  }
+  $("transfer-track-count").max = String(Math.max(1, requested));
+  $("transfer-track-count").value = String(Math.max(1, planResult.desired_track_count));
+  $("transfer-wizard").classList.remove("hidden");
+}
+
+function cancelTransfer() {
+  closeTransferWizard();
+  STATE.manualKeys = null; STATE.manualPlaylistIds = null;
+  STATE.transferMaxTracks = null;
+  $("btn-sync").disabled = true;
+  $("sync-status").textContent = "Transfer cancelled.";
+}
+$("transfer-cancel").onclick = cancelTransfer;
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("transfer-wizard").classList.contains("hidden")) cancelTransfer();
+});
+$("transfer-apply").onclick = async () => {
+  const choice = document.querySelector('input[name="transfer-choice"]:checked')?.value;
+  if (choice === "bitrate") {
+    setBitrate(activeFormat(), Number($("transfer-bitrate").value));
+    $("transcode").checked = true;
+    STATE.transferMaxTracks = null;
+  } else {
+    STATE.transferMaxTracks = Math.max(1, Number($("transfer-track-count").value) || 1);
+  }
+  closeTransferWizard();
+  await planDraggedTransfer(false);
+};
 
 $("review-all").onchange = () => {
   document.querySelectorAll(".review-op").forEach(
@@ -954,10 +1207,21 @@ $("btn-restore").onclick = restoreBackup;
 $("btn-eject").onclick = () => ejectDevice();
 $("btn-match").onclick = matchDeviceFiles;
 $("src-music").onclick = openLibrary;
+$("btn-close-inspector").onclick = closeDeviceInspector;
+$("view-inspector").onclick = () => {
+  if ($("pane-device").classList.contains("open")) closeDeviceInspector();
+  else if (STATE.currentDevice) openDeviceInspector();
+};
+$("view-list").onclick = () => {
+  $("view-list").classList.add("active");
+  openLibrary();
+};
+$("view-visualizer").onclick = () => toggleVisualizer();
 
 // ---------------------------------------------------------------- visualizer
 function resizeVisualizer() {
   const canvas = $("visualizer-canvas");
+  if (!$("lcd").classList.contains("visualizer-on")) return;
   const rect = canvas.getBoundingClientRect();
   canvas.width = Math.max(1, Math.round(rect.width * devicePixelRatio));
   canvas.height = Math.max(1, Math.round(rect.height * devicePixelRatio));
@@ -972,18 +1236,47 @@ function visualizerAnimation(wave) {
 }
 function enableVisualizer() {
   if (!window.Wave) { lcd("Visualizer unavailable", "Wave.js did not load"); return; }
-  resizeVisualizer();
-  if (!STATE.visualizer) STATE.visualizer = new Wave(player, $("visualizer-canvas"));
-  STATE.visualizer.clearAnimations();
-  STATE.visualizer.addAnimation(visualizerAnimation(STATE.visualizer));
   STATE.visualizerEnabled = true;
-  $("visualizer-empty").classList.add("hidden");
-  $("btn-visualizer").textContent = "Enabled";
-  if (player.paused && STATE.playing >= 0) player.play().catch(() => {});
+  $("lcd").classList.add("visualizer-on");
+  $("view-visualizer").classList.add("active");
+  $("lcd-viz-toggle").textContent = "▸";
+  $("lcd-viz-toggle").title = "Hide visualizer";
+  $("lcd-viz-toggle").setAttribute("aria-pressed", "true");
+  $("visualizer-empty").textContent = "Visualizer enabled in the playback display.";
+  $("btn-visualizer").textContent = "Disable";
+  requestAnimationFrame(() => {
+    resizeVisualizer();
+    if (!STATE.visualizer) STATE.visualizer = new Wave(player, $("visualizer-canvas"));
+    STATE.visualizer.clearAnimations();
+    STATE.visualizer.addAnimation(visualizerAnimation(STATE.visualizer));
+  });
 }
-$("btn-visualizer").onclick = enableVisualizer;
+function disableVisualizer() {
+  if (STATE.visualizer) STATE.visualizer.clearAnimations();
+  STATE.visualizerEnabled = false;
+  $("lcd").classList.remove("visualizer-on");
+  $("view-visualizer").classList.remove("active");
+  $("lcd-viz-toggle").textContent = "◂";
+  $("lcd-viz-toggle").title = "Show visualizer";
+  $("lcd-viz-toggle").setAttribute("aria-pressed", "false");
+  $("visualizer-empty").textContent = "The visualizer is off. Enable it here or with the small tab on the playback display.";
+  $("btn-visualizer").textContent = "Enable";
+}
+function toggleVisualizer() {
+  if (STATE.visualizerEnabled) disableVisualizer();
+  else enableVisualizer();
+}
+$("btn-visualizer").onclick = toggleVisualizer;
+$("lcd-viz-toggle").onclick = toggleVisualizer;
 $("visualizer-style").onchange = () => { if (STATE.visualizerEnabled) enableVisualizer(); };
+$("volume").oninput = () => { player.volume = Number($("volume").value); };
 window.addEventListener("resize", resizeVisualizer);
+
+// The device surface is a persistent optional inspector, not a replacement
+// page. Move it beside the main content at runtime to keep existing form IDs
+// and sync behavior intact.
+document.querySelector(".body").appendChild($("pane-device"));
+$("pane-device").classList.add("device-inspector");
 
 loadConfig();
 loadDevices();

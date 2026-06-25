@@ -17,9 +17,16 @@ echo "  iAmped Build Script — Linux / macOS"
 echo " ========================================"
 echo ""
 
-# --- Python deps ----------------------------------------------------
+# --- Python environment + deps -------------------------------------
+# Avoid Apple's old system Python/pip on macOS. Reuse the same project-local
+# environment as run.sh so dependency wheels and PyInstaller stay consistent.
+PYTHON="${PYTHON:-python3}"
+if [ ! -x .venv/bin/python ]; then
+    "$PYTHON" -m venv .venv
+fi
 echo "[1/3] Installing Python packages (app deps + PyInstaller)..."
-pip3 install -q -r requirements.txt pyinstaller
+./.venv/bin/python -m pip install -q --upgrade pip
+./.venv/bin/python -m pip install -q -r requirements.txt pyinstaller
 
 # --- Clean ----------------------------------------------------------
 echo "[2/3] Cleaning old build artefacts..."
@@ -27,7 +34,7 @@ rm -rf build dist
 
 # --- Build ----------------------------------------------------------
 echo "[3/3] Building self-contained app..."
-pyinstaller --noconfirm build_tools/iamped.spec
+./.venv/bin/python -m PyInstaller --noconfirm build_tools/iamped.spec
 
 echo ""
 echo " Done!"

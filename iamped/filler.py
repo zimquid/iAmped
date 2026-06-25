@@ -14,6 +14,10 @@ from .library import Library
 
 LOSSLESS = {"flac", "alac", "wav", "aiff", "aif", "ape", "wv"}
 TARGET_BITRATE = {"aac": 256_000, "mp3": 320_000}   # bits/sec per device format
+BITRATE_PRESETS = {
+    "aac": [64, 96, 128, 160, 192, 256],
+    "mp3": [96, 128, 160, 192, 256, 320],
+}
 
 
 def _norm(s: str | None) -> str:
@@ -38,14 +42,30 @@ def is_lossless(track: dict) -> bool:
         or (track.get("codec") or "").lower() in LOSSLESS
 
 
+def should_transcode(track: dict, transcode_enabled: bool,
+                     target_bitrate_k: int | None = None) -> bool:
+    """Whether reducing/normalizing this source can change its device size."""
+    if not transcode_enabled:
+        return False
+    if is_lossless(track):
+        return True
+    source_bitrate = int(track.get("bitrate") or 0)
+    return bool(target_bitrate_k and source_bitrate > target_bitrate_k)
+
+
 def device_size(track: dict, transcode_lossless: bool,
-                target_format: str = "mp3") -> int:
+                target_format: str = "mp3",
+                target_bitrate_k: int | None = None) -> int:
     """Estimated bytes the track will occupy on the device."""
-    if track.get("cached_size") and not (transcode_lossless and is_lossless(track)):
+    target_bitrate_k = target_bitrate_k or TARGET_BITRATE.get(
+        target_format, 320_000) // 1000
+    converting = should_transcode(
+        track, transcode_lossless, target_bitrate_k)
+    if track.get("cached_size") and not converting:
         return int(track["cached_size"])
-    if transcode_lossless and is_lossless(track):
+    if converting:
         secs = (track.get("duration_ms") or 0) / 1000.0
-        bitrate = TARGET_BITRATE.get(target_format, 320_000)
+        bitrate = target_bitrate_k * 1000
         # +5% container overhead, minimum a sane floor
         return max(int(secs * bitrate / 8 * 1.05), 256_000)
     return int(track.get("file_size") or 0)
@@ -53,7 +73,8 @@ def device_size(track: dict, transcode_lossless: bool,
 
 def bound_tracks(tracks: list[dict], max_tracks: Optional[int] = None,
                  max_bytes: Optional[int] = None, transcode_lossless: bool = True,
-                 target_format: str = "aac") -> dict:
+                 target_format: str = "aac",
+                 target_bitrate_k: int | None = None) -> dict:
     """Trim an ordered track list to fit a song-count and/or size budget — used
     to size a generated radio/playlist to an iPod (or a portion of one).
 
@@ -64,32 +85,46 @@ def bound_tracks(tracks: list[dict], max_tracks: Optional[int] = None,
     out: list[dict] = []
     used = 0
     dropped = 0
+    dropped_for_limit = 0
     for t in tracks:
         if max_tracks is not None and len(out) >= max_tracks:
             dropped += 1
+            dropped_for_limit += 1
             continue
-        sz = device_size(t, transcode_lossless, target_format)
+        sz = device_size(
+            t, transcode_lossless, target_format, target_bitrate_k)
         if max_bytes is not None and used + sz > max_bytes:
             dropped += 1
             continue
         out.append(t)
         used += sz
-    return {"tracks": out, "total_bytes": used, "dropped": dropped}
+    return {
+        "tracks": out, "total_bytes": used, "dropped": dropped,
+        "dropped_for_limit": dropped_for_limit,
+    }
 
 
 def explicit_plan(lib: Library, rating_keys: list[str], capacity_bytes: int,
                   reserve_bytes: int, transcode_lossless: bool,
-                  target_format: str = "mp3") -> dict:
+                  target_format: str = "mp3",
+                  target_bitrate_k: int | None = None,
+                  max_tracks: Optional[int] = None) -> dict:
     """Plan an iTunes-style drag/drop selection in the supplied row order."""
     rows = lib.get_tracks(rating_keys)
     ordered = [rows[k] for k in rating_keys if k in rows]
+    requested_bytes = sum(device_size(
+        t, transcode_lossless, target_format, target_bitrate_k)
+        for t in ordered)
     bounded = bound_tracks(
-        ordered, max_bytes=max(capacity_bytes - reserve_bytes, 0),
-        transcode_lossless=transcode_lossless, target_format=target_format)
+        ordered, max_tracks=max_tracks,
+        max_bytes=max(capacity_bytes - reserve_bytes, 0),
+        transcode_lossless=transcode_lossless, target_format=target_format,
+        target_bitrate_k=target_bitrate_k)
     selected = []
     for track in bounded["tracks"]:
         item = dict(track)
-        item["_size"] = device_size(item, transcode_lossless, target_format)
+        item["_size"] = device_size(
+            item, transcode_lossless, target_format, target_bitrate_k)
         selected.append(item)
     return {
         "tracks": selected,
@@ -99,9 +134,14 @@ def explicit_plan(lib: Library, rating_keys: list[str], capacity_bytes: int,
         "budget_bytes": max(capacity_bytes - reserve_bytes, 0),
         "capacity_bytes": capacity_bytes,
         "reserve_bytes": reserve_bytes,
-        "skipped_for_space": bounded["dropped"],
+        "skipped_for_space": (
+            bounded["dropped"] - bounded["dropped_for_limit"]),
+        "skipped_for_limit": bounded["dropped_for_limit"],
+        "requested_track_count": len(ordered),
+        "requested_bytes": requested_bytes,
         "skipped_present": 0,
         "transcode_lossless": transcode_lossless,
+        "target_bitrate_k": target_bitrate_k,
         "fill_strategy": "manual",
     }
 
@@ -111,18 +151,24 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
          transcode_lossless: bool, max_tracks: Optional[int] = None,
          target_format: str = "mp3",
          exclude_keys: Optional[set[str]] = None,
-         exclude_meta: Optional[set[str]] = None) -> dict:
+         exclude_meta: Optional[set[str]] = None,
+         target_bitrate_k: int | None = None,
+         fill_remaining: bool = True) -> dict:
     budget = max(capacity_bytes - reserve_bytes, 0)
     used = 0
     chosen: dict[str, dict] = {}          # rating_key -> track row (+ _size)
     order: list[str] = []                 # rating_keys in selection order
     skipped_for_space = 0
+    skipped_for_limit = 0
     skipped_present = 0
+    requested_track_count = 0
+    requested_bytes = 0
     exclude_keys = exclude_keys or set()  # rating_keys already iAmped-written
     exclude_meta = exclude_meta or set()  # (artist,title) already on the device
 
     def try_add(track: dict) -> bool:
-        nonlocal used, skipped_for_space, skipped_present
+        nonlocal used, skipped_for_space, skipped_for_limit, skipped_present
+        nonlocal requested_track_count, requested_bytes
         rk = track["rating_key"]
         if rk in chosen:
             return True
@@ -132,13 +178,17 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
                 match_key(track.get("artist"), track.get("title")) in exclude_meta:
             skipped_present += 1
             return False
-        sz = device_size(track, transcode_lossless, target_format)
+        sz = device_size(
+            track, transcode_lossless, target_format, target_bitrate_k)
         if sz <= 0:
             return False
+        requested_track_count += 1
+        requested_bytes += sz
         if used + sz > budget:
             skipped_for_space += 1
             return False
         if max_tracks and len(chosen) >= max_tracks:
+            skipped_for_limit += 1
             return False
         track = dict(track)
         track["_size"] = sz
@@ -167,7 +217,7 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
         })
 
     # 2) fill the rest by ranking
-    if not max_tracks or len(chosen) < max_tracks:
+    if fill_remaining and (not max_tracks or len(chosen) < max_tracks):
         for tr in lib.ordered_tracks(fill_strategy):
             if used >= budget:
                 break
@@ -183,7 +233,11 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
         "capacity_bytes": capacity_bytes,
         "reserve_bytes": reserve_bytes,
         "skipped_for_space": skipped_for_space,
+        "skipped_for_limit": skipped_for_limit,
+        "requested_track_count": requested_track_count,
+        "requested_bytes": requested_bytes,
         "skipped_present": skipped_present,
         "transcode_lossless": transcode_lossless,
+        "target_bitrate_k": target_bitrate_k,
         "fill_strategy": fill_strategy,
     }

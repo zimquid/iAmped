@@ -105,7 +105,7 @@ def _ext_for(track: dict) -> str:
 
 
 def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
-                fmt: str):
+                fmt: str, bitrate_k: int | None = None):
     """Ensure a local audio file exists in the device's target format. Returns
     (local_path, ext_with_dot). `fmt` is 'aac' (iPod) or 'mp3' (USB)."""
     cache = config.load()["cache_dir"]
@@ -116,12 +116,15 @@ def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
         plex_client.download_part(server, track["part_key"], orig)
         lib.set_cached(rk, orig, os.path.getsize(orig))
 
-    if transcode_lossless and filler.is_lossless(track) and have_ffmpeg():
+    if filler.should_transcode(
+            track, transcode_lossless, bitrate_k) and have_ffmpeg():
         ext = ".m4a" if fmt == "aac" else ".mp3"
-        out = os.path.join(cache, f"{rk}{ext}")
+        output_base = os.path.join(
+            cache, f"{rk}.{fmt}.{bitrate_k or 0}k")
+        out = output_base + ext
         if not (os.path.exists(out) and os.path.getsize(out) > 0):
             try:
-                transcode(orig, os.path.join(cache, rk), fmt)
+                transcode(orig, output_base, fmt, bitrate_k)
             except Exception:
                 return orig, orig_ext          # fall back to the original
         return out, ext
@@ -179,23 +182,27 @@ def _device_plan(params: dict) -> dict:
             exclude_meta = set()
 
     reserve = int(params.get("reserve_mb", 200)) * 1024 * 1024
+    fmt = target_format(dtype)
+    bitrate_k = int(params.get("target_bitrate_k")
+                    or (256 if fmt == "aac" else 320))
     if "rating_keys" in params:
         plan = filler.explicit_plan(
             lib, [str(k) for k in params.get("rating_keys", [])], capacity,
             reserve, bool(params.get("transcode_lossless", True)),
-            target_format(dtype))
+            fmt, bitrate_k, params.get("max_tracks"))
     else:
         plan = filler.plan(
             lib, capacity, reserve, params.get("fill_strategy", "most_played"),
             params.get("playlist_ids", []),
             bool(params.get("transcode_lossless", True)), params.get("max_tracks"),
-            target_format(dtype), exclude_keys=exclude_keys,
-            exclude_meta=exclude_meta)
+            fmt, exclude_keys=exclude_keys, exclude_meta=exclude_meta,
+            target_bitrate_k=bitrate_k,
+            fill_remaining=not bool(params.get("playlist_only")))
 
-    fmt = target_format(dtype)
     transcode_lossless = bool(params.get("transcode_lossless", True))
     for track in plan["tracks"]:
-        output = fmt if transcode_lossless and filler.is_lossless(track) \
+        output = f"{fmt}:{bitrate_k}k" if filler.should_transcode(
+            track, transcode_lossless, bitrate_k) \
             else (track.get("container") or track.get("codec") or "original")
         track["_sync_signature"] = "|".join([
             str(track.get("part_key") or ""),
@@ -281,6 +288,35 @@ def _device_plan(params: dict) -> dict:
             pending_tx and pending_tx.get("status") in {"copying", "metadata", "cleanup"}),
         "mirror": mirror,
     }
+
+
+def _bitrate_options(params: dict, budget_bytes: int) -> list[dict]:
+    """Estimate a dragged selection at each supported target bitrate."""
+    lib = _lib()
+    keys = [str(k) for k in params.get("rating_keys", [])]
+    if not keys:
+        for pid in params.get("playlist_ids", []):
+            keys.extend(lib.playlist_track_keys_any(pid))
+    keys = list(dict.fromkeys(keys))
+    rows = lib.get_tracks(keys)
+    ordered = [rows[key] for key in keys if key in rows]
+    fmt = target_format(params.get("device_type", "massstorage"))
+    enabled = bool(params.get("transcode_lossless", True))
+    options = []
+    for bitrate_k in filler.BITRATE_PRESETS[fmt]:
+        requested_bytes = sum(
+            filler.device_size(t, enabled, fmt, bitrate_k) for t in ordered)
+        bounded = filler.bound_tracks(
+            ordered, max_bytes=budget_bytes,
+            transcode_lossless=enabled, target_format=fmt,
+            target_bitrate_k=bitrate_k)
+        options.append({
+            "bitrate_k": bitrate_k,
+            "requested_bytes": requested_bytes,
+            "fitting_tracks": len(bounded["tracks"]),
+            "fits": bounded["dropped"] == 0,
+        })
+    return options
 
 
 # --------------------------------------------------------------------------- jobs
@@ -377,8 +413,10 @@ def _sync_job_inner(job, params):
     job["done"] = len(tracks) - len(remaining)
     job["phase"] = "syncing"
     tl = bool(params["transcode_lossless"])
-    want_artwork = bool(params.get("sync_artwork", True))
     fmt = target_format(dtype)
+    bitrate_k = int(params.get("target_bitrate_k")
+                    or (256 if fmt == "aac" else 320))
+    want_artwork = bool(params.get("sync_artwork", True))
     # Downloading from Plex and transcoding are the slow, independent parts; the
     # actual copy onto the iPod/USB must stay serial (the iTunesDB and file tree
     # aren't written concurrently). So prefetch materialization in a small thread
@@ -389,7 +427,8 @@ def _sync_job_inner(job, params):
 
     workers = max(1, min(4, len(remaining)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(materialize, server, lib, tr, tl, fmt)
+        futures = [pool.submit(
+            materialize, server, lib, tr, tl, fmt, bitrate_k)
                    for tr in remaining]
         album_futures = {}
         art_futures = []
@@ -682,6 +721,8 @@ def _bound_and_save(d: dict, metas: list, kind: str, title: str,
     import dataclasses
     fmt = target_format(d.get("device_type", "ipod"))
     tl = bool(d.get("transcode_lossless", True))
+    bitrate_k = int(d.get("target_bitrate_k")
+                    or (256 if fmt == "aac" else 320))
     max_tracks = int(d["max_tracks"]) if d.get("max_tracks") else None
     max_bytes = int(float(d["max_mb"]) * 1024 * 1024) if d.get("max_mb") else None
     # "fit a part of the iPod": cap by a fraction of the device's free space
@@ -691,7 +732,7 @@ def _bound_and_save(d: dict, metas: list, kind: str, title: str,
 
     meta_by_key = {m.rating_key: m for m in metas}
     bounded = filler.bound_tracks([dataclasses.asdict(m) for m in metas],
-                                  max_tracks, max_bytes, tl, fmt)
+                                  max_tracks, max_bytes, tl, fmt, bitrate_k)
     keys = [t["rating_key"] for t in bounded["tracks"]]
     lib = _lib()
     lib.upsert_tracks([meta_by_key[k] for k in keys])   # cache for the sync
@@ -699,7 +740,7 @@ def _bound_and_save(d: dict, metas: list, kind: str, title: str,
                                     json.dumps(rules), keys)
     preview = [{"artist": t.get("artist"), "title": t.get("title"),
                 "album": t.get("album"), "duration_ms": t.get("duration_ms"),
-                "size": filler.device_size(t, tl, fmt)}
+                "size": filler.device_size(t, tl, fmt, bitrate_k)}
                for t in bounded["tracks"][:300]]
     return {"ok": True, "id": f"local:{pid}", "title": title,
             "count": len(keys), "total_bytes": bounded["total_bytes"],
@@ -816,8 +857,12 @@ def api_stream(rk):
         return jsonify({"error": str(exc)}), 400
     url = plex_client.stream_url(server, tr["part_key"])
     native = (tr.get("container") or "").lower() in _NATIVE_STREAM
+    try:
+        start = max(0.0, float(request.args.get("start", "0") or 0))
+    except ValueError:
+        return jsonify({"error": "invalid start time"}), 400
 
-    if native or not have_ffmpeg():
+    if (native and not start) or not have_ffmpeg():
         # proxy the original, forwarding Range so the browser can seek
         req_range = request.headers.get("Range")
         headers = {"Range": req_range} if req_range else {}
@@ -830,10 +875,14 @@ def api_stream(rk):
         return resp
 
     # transcode lossless -> mp3 on the fly for in-browser playback
-    proc = subprocess.Popen(
-        ["ffmpeg", "-loglevel", "error", "-i", url, "-map", "0:a:0",
+    command = ["ffmpeg", "-loglevel", "error"]
+    if start:
+        command.extend(["-ss", f"{start:.3f}"])
+    command.extend(
+        ["-i", url, "-map", "0:a:0",
          "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "-"],
-        stdout=subprocess.PIPE)
+    )
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE)
 
     def gen():
         try:
@@ -879,6 +928,9 @@ def api_plan():
         "reserve_mb": int(p.get("reserve_mb", 200)),
         "fill_strategy": p.get("fill_strategy", "most_played"),
         "transcode_lossless": bool(p.get("transcode_lossless", True)),
+        f"{target_format(p.get('device_type', 'massstorage'))}_bitrate_k":
+            int(p.get("target_bitrate_k") or (
+                256 if p.get("device_type") == "ipod" else 320)),
         "sync_artwork": bool(p.get("sync_artwork", True)),
         "mirror": bool(p.get("mirror", True)),
     })
@@ -912,6 +964,8 @@ def api_plan():
             "artist": record.get("artist"), "album": record.get("album"),
             "size": int(record.get("size") or 0),
         })
+    transfer_options = _bitrate_options(
+        p, plan["budget_bytes"]) if p.get("transfer_request") else []
     return jsonify({
         "track_count": len(diff["add_tracks"]),
         "update_count": len(diff["update_keys"]),
@@ -927,6 +981,13 @@ def api_plan():
         "capacity_bytes": plan["capacity_bytes"],
         "reserve_bytes": plan["reserve_bytes"],
         "skipped_for_space": plan["skipped_for_space"],
+        "skipped_for_limit": plan.get("skipped_for_limit", 0),
+        "requested_track_count": plan.get(
+            "requested_track_count", plan["track_count"]),
+        "requested_bytes": plan.get("requested_bytes", plan["total_bytes"]),
+        "target_bitrate_k": plan.get("target_bitrate_k"),
+        "target_format": target_format(p.get("device_type", "massstorage")),
+        "bitrate_options": transfer_options,
         "playlists": [{"title": pl["title"], "count": len(pl["track_keys"]),
                        "requested": pl["requested"]} for pl in plan["playlists"]],
         "preview": preview,

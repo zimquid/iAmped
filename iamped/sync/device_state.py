@@ -113,6 +113,7 @@ def plan_hash(device_type: str, desired_keys: list[str], params: dict) -> str:
         "playlist_ids": params.get("playlist_ids", []),
         "fill_strategy": params.get("fill_strategy"),
         "transcode_lossless": bool(params.get("transcode_lossless")),
+        "target_bitrate_k": int(params.get("target_bitrate_k") or 0),
         "mirror": bool(params.get("mirror")),
     }
     raw = json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()

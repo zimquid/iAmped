@@ -115,11 +115,14 @@ def target_format(device_type: str) -> str:
     return TARGET_FORMAT.get(device_type, "mp3")
 
 
-def transcode(src: str, dst_base: str, fmt: str) -> tuple[str, str]:
+def transcode(src: str, dst_base: str, fmt: str,
+              bitrate_k: int | None = None) -> tuple[str, str]:
     """Transcode to fmt ('aac'|'mp3'); returns (path, ext)."""
     if fmt == "aac":
-        return transcode_to_aac(src, dst_base + ".m4a"), ".m4a"
-    return transcode_to_mp3(src, dst_base + ".mp3"), ".mp3"
+        return transcode_to_aac(
+            src, dst_base + ".m4a", bitrate_k or 256), ".m4a"
+    return transcode_to_mp3(
+        src, dst_base + ".mp3", bitrate_k or 320), ".mp3"
 
 
 def have_ffmpeg() -> bool:
