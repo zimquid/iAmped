@@ -68,7 +68,8 @@ def save_profile(path: str, dtype: str, values: dict) -> dict:
     all_profiles = profiles()
     allowed = {
         "name", "device_type", "reserve_mb", "fill_strategy",
-        "transcode_lossless", "sync_artwork", "mirror", "playlist_ids",
+        "transcode_lossless", "target_bitrate_k",
+        "sync_artwork", "mirror", "playlist_ids",
     }
     current = all_profiles.get(did, {})
     current.update({k: v for k, v in values.items() if k in allowed})

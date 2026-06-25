@@ -58,6 +58,8 @@ DEFAULTS: dict[str, Any] = {
     "reserve_mb": 200,
     "fill_strategy": "most_played",
     "transcode_lossless": True,
+    "aac_bitrate_k": 256,
+    "mp3_bitrate_k": 320,
     "sync_artwork": True,
     "mirror": True,
 }

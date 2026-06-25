@@ -15,14 +15,31 @@
       <div class="tbtn" id="t-play"><svg viewBox="0 0 16 16"><path d="M3 2l11 6L3 14z"/></svg></div>
       <div class="tbtn" id="t-next"><svg viewBox="0 0 16 16"><path d="M11 3v10l4-5zM10 8L2 3v10z"/></svg></div>
     </div>
+    <div class="volume-control" title="Volume">
+      <svg viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2zM11 6c1 1 1 3 0 4M13 4c2 2 2 6 0 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <input id="volume" type="range" min="0" max="1" step=".02" value="1">
+    </div>
     <div class="lcd" id="lcd">
-      <div class="lcd-main" id="lcd-main">iAmped</div>
-      <div class="lcd-sub" id="lcd-sub">Plexamp metadata → iPod &amp; MP3 players</div>
-      <div class="lcd-progrow hidden" id="lcd-progrow">
-        <span class="lcd-time" id="lcd-elapsed">0:00</span>
-        <div class="lcd-prog" id="lcd-prog"><div></div></div>
-        <span class="lcd-time" id="lcd-remain">-0:00</span>
+      <div class="lcd-stage">
+        <div class="lcd-copy">
+          <div class="lcd-main" id="lcd-main">iAmped</div>
+          <div class="lcd-sub" id="lcd-sub">Plexamp metadata → iPod &amp; MP3 players</div>
+          <div class="lcd-progrow hidden" id="lcd-progrow">
+            <span class="lcd-time" id="lcd-elapsed">0:00</span>
+            <div class="lcd-prog" id="lcd-prog"><div></div></div>
+            <span class="lcd-time" id="lcd-remain">-0:00</span>
+          </div>
+        </div>
+        <div class="lcd-visualizer" id="lcd-visualizer">
+          <canvas id="visualizer-canvas"></canvas>
+        </div>
       </div>
+      <button class="lcd-viz-toggle" id="lcd-viz-toggle" title="Show visualizer" aria-pressed="false">◂</button>
+    </div>
+    <div class="view-switch" aria-label="View">
+      <button id="view-list" class="active" title="List view"><svg viewBox="0 0 16 16"><path d="M2 3h12v2H2zm0 4h12v2H2zm0 4h12v2H2z"/></svg></button>
+      <button id="view-visualizer" title="Visualizer"><svg viewBox="0 0 16 16"><path d="M2 11V7h2v4zm4 0V3h2v8zm4 0V5h2v6zm4 0V2h2v9z"/></svg></button>
+      <button id="view-inspector" title="Device inspector"><svg viewBox="0 0 16 16"><path d="M2 2h12v12H2zm8 1v10h3V3z"/></svg></button>
     </div>
     <div class="search">
       <svg viewBox="0 0 16 16"><path d="M6.5 1a5.5 5.5 0 014.2 9l4.1 4.1-1.4 1.4-4.1-4.1A5.5 5.5 0 116.5 1zm0 2a3.5 3.5 0 100 7 3.5 3.5 0 000-7z"/></svg>
@@ -108,9 +125,8 @@
             <button id="btn-visualizer">Enable</button>
           </div>
         </div>
-        <div class="visualizer-shell">
-          <canvas id="visualizer-canvas"></canvas>
-          <div id="visualizer-empty">Start a track, then enable the visualizer.</div>
+        <div class="visualizer-shell visualizer-settings">
+          <div id="visualizer-empty">The visualizer now appears inside the playback display. Start a track and enable it here or with the small tab on the right edge of the display.</div>
         </div>
         <div class="muted visualizer-credit">Wave.js · MIT licensed · bundled for offline use</div>
       </div>
@@ -154,6 +170,8 @@
         </div>
         <div class="songlist">
           <div class="songhead" id="browse-head-row">
+            <div class="c-check"><input type="checkbox" checked tabindex="-1"></div>
+            <div class="c-num">#</div>
             <div class="c-play"></div>
             <div class="c-name" data-sort="title">Name</div>
             <div class="c-artist" data-sort="artist">Artist</div>
@@ -171,6 +189,7 @@
         <div class="dev-head">
           <div class="pic"></div>
           <div><h2 id="dev-name-h">Device</h2><div class="sub" id="dev-sub">—</div></div>
+          <button class="inspector-close" id="btn-close-inspector" title="Close inspector">×</button>
         </div>
         <div class="radio-row">
           <label><input type="radio" name="dtype" value="massstorage" checked> USB MP3 player — FLAC→MP3, files + M3U</label>
@@ -199,7 +218,12 @@
             <input type="number" id="reserve" value="200" min="0" step="50"></div>
         </div>
         <label class="check"><input type="checkbox" id="transcode" checked>
-          Transcode lossless (FLAC/ALAC) — AAC for iPod, MP3 for USB <span class="muted" id="ffmpeg-note"></span></label>
+          Transcode lossless and higher-bitrate files when needed <span class="muted" id="ffmpeg-note"></span></label>
+        <div class="bitrate-control">
+          <div class="bitrate-label"><label id="bitrate-format">MP3 bitrate</label><b id="bitrate-value">320 kbps</b></div>
+          <input id="bitrate-notch" type="range" min="0" max="5" step="1" value="5">
+          <div class="bitrate-ticks" id="bitrate-ticks"></div>
+        </div>
         <label class="check"><input type="checkbox" id="sync-artwork" checked>
           Sync album artwork — embedded tags/cover.jpg for USB, ArtworkDB for supported iPods</label>
         <label class="check"><input type="checkbox" id="mirror" checked>
@@ -285,6 +309,30 @@
       <div class="sp-bar"><div id="sp-fill"></div></div>
     </div>
     <div class="sync-actions hidden" id="sync-actions"><button class="aqua" id="btn-sync" disabled>Sync</button></div>
+  </div>
+
+  <div class="transfer-wizard hidden" id="transfer-wizard" role="dialog" aria-modal="true" aria-labelledby="transfer-wizard-title">
+    <div class="transfer-sheet">
+      <div class="transfer-icon">!</div>
+      <div class="transfer-copy">
+        <h2 id="transfer-wizard-title">This playlist will not fit</h2>
+        <p id="transfer-wizard-summary"></p>
+        <label class="transfer-option" id="transfer-bitrate-option">
+          <input type="radio" name="transfer-choice" value="bitrate" checked>
+          <span><b>Reduce audio bitrate</b><small id="transfer-bitrate-help"></small></span>
+          <select id="transfer-bitrate"></select>
+        </label>
+        <label class="transfer-option">
+          <input type="radio" name="transfer-choice" value="tracks">
+          <span><b>Move fewer songs</b><small>Keep the playlist order and stop at the selected song count.</small></span>
+          <input id="transfer-track-count" type="number" min="1">
+        </label>
+        <div class="transfer-actions">
+          <button id="transfer-cancel">Cancel</button>
+          <button class="aqua" id="transfer-apply">Apply &amp; Preview</button>
+        </div>
+      </div>
+    </div>
   </div>
 
 </div>
