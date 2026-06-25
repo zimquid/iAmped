@@ -1,0 +1,30 @@
+# Runtime credentials and user data
+config.json
+device-profiles.json
+iAmped-data/
+.iamped/
+library.db
+cache/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build output
+build/
+dist/
+*.spec.local
+
+# Local development and agent state
+.DS_Store
+.claude/
+.codex/
+.codex-worktrees/
+test-artifacts/
+
+# Editor and OS files
+.idea/
+.vscode/
+Thumbs.db

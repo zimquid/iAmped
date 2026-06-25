@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iAmped — UI preview</title>
+<style>
+*{box-sizing:border-box;margin:0;font-family:"Lucida Grande","Helvetica Neue",Helvetica,Arial,sans-serif}
+html,body{height:100%}
+body{background:#9c9c9c;overflow:hidden}
+.ia{position:absolute;inset:0;display:flex;flex-direction:column;background:#d7d7d7;color:#1f1f1f}
+.tb{height:22px;position:relative;display:flex;align-items:center;background:linear-gradient(#e8e8e8,#cfcfcf);border-bottom:1px solid #a6a6a6}
+.lt{display:flex;gap:8px;padding-left:9px}
+.lt span{width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.3)}
+.r{background:radial-gradient(circle at 35% 30%,#ff9a91,#e4564b)}
+.y{background:radial-gradient(circle at 35% 30%,#ffe08a,#e2a73a)}
+.g{background:radial-gradient(circle at 35% 30%,#b7ec88,#46b13a)}
+.tt{position:absolute;left:0;right:0;text-align:center;font-size:12px;font-weight:bold;color:#4a4a4a;text-shadow:0 1px 0 #fff}
+.tool{height:54px;display:flex;align-items:center;gap:14px;padding:0 14px;background:linear-gradient(#d6d6d6,#b3b3b3);border-bottom:1px solid #7d7d7d;box-shadow:inset 0 1px 0 #efefef}
+.trans{display:flex;gap:6px}
+.bt{width:30px;height:26px;border-radius:5px;background:linear-gradient(#fdfdfd,#d8d8d8);border:1px solid #9a9a9a;box-shadow:inset 0 1px 0 #fff;display:grid;place-items:center;color:#666}
+.bt svg{width:13px;height:13px;fill:#666}
+.lcd{flex:1;max-width:420px;margin:0 auto;height:38px;border-radius:6px;padding:4px 14px;background:linear-gradient(#eef2f6,#cfd8e2);border:1px solid #8c97a6;box-shadow:inset 0 1px 2px rgba(0,0,0,.25),0 1px 0 #fff;display:flex;flex-direction:column;justify-content:center;text-align:center}
+.lcd b{font-size:12px;color:#2b2f36;text-shadow:0 1px 0 #fdfeff}
+.lcd small{font-size:10px;color:#5d6675}
+.prog{height:9px;margin-top:4px;border-radius:5px;background:linear-gradient(#c4ccd6,#dbe1e9);border:1px solid #94a0b0;overflow:hidden}
+.prog i{display:block;height:100%;width:64%;background:linear-gradient(#aacdf6,#4f8fe0)}
+.srch{display:flex;align-items:center;gap:5px;width:150px;background:#fff;border:1px solid #9a9a9a;border-radius:13px;padding:3px 10px;box-shadow:inset 0 1px 2px rgba(0,0,0,.15);font-size:11px;color:#999}
+.srch svg{width:12px;height:12px;fill:#8a8a8a}
+.body{flex:1;display:flex;min-height:0}
+.side{width:200px;background:linear-gradient(#dfe6ef,#ccd5e2);border-right:1px solid #9aa3b0;padding:8px 0;overflow:hidden}
+.sec{font-size:10px;font-weight:bold;text-transform:uppercase;color:#71798a;text-shadow:0 1px 0 rgba(255,255,255,.7);padding:9px 12px 3px}
+.it{display:flex;align-items:center;gap:7px;padding:4px 12px 4px 22px;font-size:12px;color:#2c3340;height:22px}
+.it svg{width:15px;height:15px;fill:#5f6b7e;flex:none}
+.it .ej{margin-left:auto;opacity:.5}
+.it .ej svg{width:12px;height:12px}
+.sel{color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.4);background:linear-gradient(#5a9bee,#2f73da);border-top:1px solid #7fb2f4;border-bottom:1px solid #275fb0;box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+.sel svg{fill:#fff}
+.cont{flex:1;background:#fff;padding:18px 24px;overflow:hidden;min-width:0}
+.dh{display:flex;align-items:center;gap:14px;padding-bottom:13px;border-bottom:1px solid #e3e3e3;margin-bottom:14px}
+.pic{width:54px;height:76px;border-radius:7px;background:linear-gradient(#fafafa,#d2d2d2);border:1px solid #9c9c9c;box-shadow:inset 0 1px 0 #fff;position:relative;flex:none}
+.pic::before{content:"";position:absolute;top:7px;left:8px;right:8px;height:25px;border-radius:3px;background:linear-gradient(#cfe6ff,#9cc4ef);border:1px solid #7fa6cf}
+.pic::after{content:"";position:absolute;left:50%;bottom:9px;width:22px;height:22px;margin-left:-11px;border-radius:50%;background:radial-gradient(circle at 38% 32%,#fff,#c9c9c9);border:1px solid #9a9a9a}
+.dh h3{font-size:16px;color:#2a2a2a}
+.dh .s{font-size:12px;color:#777}
+.cfg{display:flex;gap:18px;font-size:12px;color:#333;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+.cfg select,.cfg input{font-size:12px;padding:4px 7px;border:1px solid #a6a6a6;border-radius:4px;box-shadow:inset 0 1px 2px rgba(0,0,0,.12);background:#fff}
+.chips{margin:10px 0 4px}
+.chip{display:inline-block;background:#eef1f6;border:1px solid #c5cdd9;border-radius:10px;padding:1px 9px;font-size:11px;color:#44607f;margin:0 4px 4px 0}
+.list{border:1px solid #c6c6c6;border-radius:4px;overflow:hidden;margin-top:8px}
+.hd{display:flex;background:linear-gradient(#fafafa,#dadada);border-bottom:1px solid #b4b4b4;font-size:11px;color:#4a4a4a}
+.hd div{padding:4px 8px;border-right:1px solid #cfcfcf;font-weight:bold}
+.rw{display:flex;font-size:11.5px;color:#222}
+.rw:nth-child(odd){background:#eaf1fd}
+.rw div{padding:3px 8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.cn{width:30px;color:#aaa;text-align:right}
+.ct{flex:2;min-width:0}.ca{flex:1.4;min-width:0;color:#444}.cb{flex:1.4;min-width:0;color:#666}
+.cp{width:54px;text-align:right;color:#666}.cs{width:60px;text-align:right;color:#666}
+.ll{font-size:9px;color:#4a749c;border:1px solid #aac3dd;border-radius:3px;padding:0 3px;margin-left:5px}
+.bot{height:44px;display:flex;align-items:center;gap:12px;padding:0 12px;background:linear-gradient(#dfdfdf,#bcbcbc);border-top:1px solid #f2f2f2;box-shadow:inset 0 1px 0 #fff}
+.add{width:26px;height:26px;border-radius:5px;font-size:16px;color:#555;background:linear-gradient(#fcfcfc,#d8d8d8);border:1px solid #8f8f8f}
+.cap{flex:1;height:16px;border-radius:8px;overflow:hidden;display:flex;background:#cfcfcf;border:1px solid #8d8d8d;box-shadow:inset 0 1px 2px rgba(0,0,0,.3)}
+.cap i{display:block;height:100%}
+.sm{background:linear-gradient(#ffd980,#f4a72b)}.srv{background:linear-gradient(#cfcfcf,#a9a9a9)}.sf{background:linear-gradient(#fdfdfd,#e6e6e6)}
+.leg{display:flex;gap:12px;font-size:11px;color:#444;align-items:center}
+.leg span{display:flex;align-items:center;gap:5px}
+.leg i{width:11px;height:11px;border-radius:2px;border:1px solid rgba(0,0,0,.25);display:inline-block}
+.syn{color:#16314f;font-weight:bold;font-size:12px;padding:5px 18px;border-radius:5px;background:linear-gradient(#d8ecff,#93c2f4 48%,#6aa8ee 52%,#aad2fb);border:1px solid #3f78bd;box-shadow:inset 0 1px 0 rgba(255,255,255,.8)}
+</style>
+</head>
+<body>
+<div class="ia">
+  <div class="tb"><div class="lt"><span class="r"></span><span class="y"></span><span class="g"></span></div><div class="tt">iAmped</div></div>
+  <div class="tool">
+    <div class="trans">
+      <div class="bt"><svg viewBox="0 0 16 16"><path d="M5 3v10L1 8zM6 8l8-5v10z"/></svg></div>
+      <div class="bt"><svg viewBox="0 0 16 16"><path d="M3 2l11 6L3 14z"/></svg></div>
+      <div class="bt"><svg viewBox="0 0 16 16"><path d="M11 3v10l4-5zM10 8L2 3v10z"/></svg></div>
+    </div>
+    <div class="lcd"><b>Filling “Kris’s iPod”…</b><small>The National — Bloodbuzz Ohio · 1,402 of 3,184</small><div class="prog"><i></i></div></div>
+    <div class="srch"><svg viewBox="0 0 16 16"><path d="M6.5 1a5.5 5.5 0 014.2 9l4.1 4.1-1.4 1.4-4.1-4.1A5.5 5.5 0 116.5 1zm0 2a3.5 3.5 0 100 7 3.5 3.5 0 000-7z"/></svg>Search</div>
+  </div>
+  <div class="body">
+    <div class="side">
+      <div class="sec">Setup</div>
+      <div class="it"><svg viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="4" fill="none" stroke="#5f6b7e"/><rect x="2" y="7" width="12" height="4" fill="none" stroke="#5f6b7e"/></svg>Plex Server</div>
+      <div class="sec">Library</div>
+      <div class="it"><svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>Music</div>
+      <div class="it"><svg viewBox="0 0 16 16"><path d="M1 3h10v1.6H1zM1 6h10v1.6H1zM1 9h6v1.6H1zM12 7l3 2-3 2z"/></svg>Playlists</div>
+      <div class="sec">Devices</div>
+      <div class="it sel"><svg viewBox="0 0 16 16"><rect x="3" y="1" width="10" height="14" rx="2" fill="none" stroke="#5f6b7e"/><rect x="4.5" y="2.5" width="7" height="5"/><circle cx="8" cy="11" r="2.2" fill="none" stroke="#5f6b7e"/></svg>Kris’s iPod<span class="ej"><svg viewBox="0 0 16 16"><path d="M8 3l5 6H3zM3 11h10v2H3z"/></svg></span></div>
+      <div class="it"><svg viewBox="0 0 16 16"><rect x="1" y="3" width="14" height="10" rx="1.5" fill="none" stroke="#5f6b7e"/></svg>SANSA CLIP<span class="ej"><svg viewBox="0 0 16 16"><path d="M8 3l5 6H3zM3 11h10v2H3z"/></svg></span></div>
+    </div>
+    <div class="cont">
+      <div class="dh"><div class="pic"></div><div><h3>Kris’s iPod</h3><div class="s">iPod video (5G), 30 GB · 27.4 GB free · /Volumes/IPOD</div></div></div>
+      <div class="cfg">Fill by <select><option>Most played</option><option>Highest rated</option><option>Recently played</option><option>Random</option></select> · Leave free <input value="200" style="width:54px"> MB · <label><input type="checkbox" checked> Transcode lossless → MP3 320k</label></div>
+      <div class="chips"><b style="font-size:12px">3,184 tracks · 26.9 GB</b> &nbsp; <span class="chip">Recently Added: 142/142</span><span class="chip">5-star songs: 311/311</span><span class="chip">Road Trip: 88/88</span></div>
+      <div class="list">
+        <div class="hd"><div class="cn">#</div><div class="ct">Name</div><div class="ca">Artist</div><div class="cb">Album</div><div class="cp">Plays</div><div class="cs">Size</div></div>
+        <div class="rw"><div class="cn">1</div><div class="ct">Bloodbuzz Ohio</div><div class="ca">The National</div><div class="cb">High Violet</div><div class="cp">214</div><div class="cs">9.1 MB</div></div>
+        <div class="rw"><div class="cn">2</div><div class="ct">Two Weeks<span class="ll">lossless</span></div><div class="ca">Grizzly Bear</div><div class="cb">Veckatimest</div><div class="cp">198</div><div class="cs">10.4 MB</div></div>
+        <div class="rw"><div class="cn">3</div><div class="ct">Electric Feel</div><div class="ca">MGMT</div><div class="cb">Oracular Spectacular</div><div class="cp">187</div><div class="cs">8.2 MB</div></div>
+        <div class="rw"><div class="cn">4</div><div class="ct">Skinny Love</div><div class="ca">Bon Iver</div><div class="cb">For Emma, Forever Ago</div><div class="cp">176</div><div class="cs">7.6 MB</div></div>
+        <div class="rw"><div class="cn">5</div><div class="ct">My Girls<span class="ll">lossless</span></div><div class="ca">Animal Collective</div><div class="cb">Merriweather Post Pavilion</div><div class="cp">169</div><div class="cs">13.8 MB</div></div>
+        <div class="rw"><div class="cn">6</div><div class="ct">1901</div><div class="ca">Phoenix</div><div class="cb">Wolfgang Amadeus Phoenix</div><div class="cp">161</div><div class="cs">6.9 MB</div></div>
+        <div class="rw"><div class="cn">7</div><div class="ct">Lisztomania</div><div class="ca">Phoenix</div><div class="cb">Wolfgang Amadeus Phoenix</div><div class="cp">154</div><div class="cs">7.4 MB</div></div>
+        <div class="rw"><div class="cn">8</div><div class="ct">Kids</div><div class="ca">MGMT</div><div class="cb">Oracular Spectacular</div><div class="cp">149</div><div class="cs">9.6 MB</div></div>
+        <div class="rw"><div class="cn">9</div><div class="ct">Dog Days Are Over</div><div class="ca">Florence + the Machine</div><div class="cb">Lungs</div><div class="cp">141</div><div class="cs">8.7 MB</div></div>
+        <div class="rw"><div class="cn">10</div><div class="ct">Crystalised</div><div class="ca">The xx</div><div class="cb">xx</div><div class="cp">138</div><div class="cs">6.2 MB</div></div>
+        <div class="rw"><div class="cn">11</div><div class="ct">Cousins</div><div class="ca">Vampire Weekend</div><div class="cb">Contra</div><div class="cp">133</div><div class="cs">5.9 MB</div></div>
+        <div class="rw"><div class="cn">12</div><div class="ct">Heartbeats<span class="ll">lossless</span></div><div class="ca">José González</div><div class="cb">Veneer</div><div class="cp">127</div><div class="cs">11.2 MB</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="bot">
+    <button class="add">+</button>
+    <div class="cap"><i class="sm" style="width:90%"></i><i class="srv" style="width:3%"></i><i class="sf" style="width:7%"></i></div>
+    <div class="leg"><span><i class="sm"></i>Music 26.9 GB</span><span><i class="srv"></i>Reserved 0.2 GB</span><span><i class="sf"></i>Free 0.5 GB</span></div>
+    <button class="syn">Sync</button>
+  </div>
+</div>
+</body>
+</html>

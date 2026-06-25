@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iAmped</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="itunes">
+
+  <div class="toolbar">
+    <div class="transport">
+      <div class="tbtn" id="t-prev"><svg viewBox="0 0 16 16"><path d="M5 3v10L1 8zM6 8l8-5v10z"/></svg></div>
+      <div class="tbtn" id="t-play"><svg viewBox="0 0 16 16"><path d="M3 2l11 6L3 14z"/></svg></div>
+      <div class="tbtn" id="t-next"><svg viewBox="0 0 16 16"><path d="M11 3v10l4-5zM10 8L2 3v10z"/></svg></div>
+    </div>
+    <div class="lcd" id="lcd">
+      <div class="lcd-main" id="lcd-main">iAmped</div>
+      <div class="lcd-sub" id="lcd-sub">Plexamp metadata → iPod &amp; MP3 players</div>
+      <div class="lcd-progrow hidden" id="lcd-progrow">
+        <span class="lcd-time" id="lcd-elapsed">0:00</span>
+        <div class="lcd-prog" id="lcd-prog"><div></div></div>
+        <span class="lcd-time" id="lcd-remain">-0:00</span>
+      </div>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 16 16"><path d="M6.5 1a5.5 5.5 0 014.2 9l4.1 4.1-1.4 1.4-4.1-4.1A5.5 5.5 0 116.5 1zm0 2a3.5 3.5 0 100 7 3.5 3.5 0 000-7z"/></svg>
+      <input type="text" id="search" placeholder="Search">
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="sidebar">
+      <div class="src-section">Setup</div>
+      <div class="src-item" data-pane="pane-plex">
+        <svg viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="4" fill="none" stroke="#5f6b7e"/><rect x="2" y="7" width="12" height="4" fill="none" stroke="#5f6b7e"/></svg>
+        Plex Server</div>
+
+      <div class="src-section">Library</div>
+      <div class="src-item" id="src-music">
+        <svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>
+        Music</div>
+
+      <div class="src-section">View</div>
+      <div class="src-item" id="src-visualizer" data-pane="pane-visualizer">
+        <svg viewBox="0 0 16 16"><path d="M1 9h2l1-6 2 11 2-8 2 5 2-9 2 7h1v2h-3l-1-4-2 8-2-5-2 6-2-5H1z"/></svg>
+        Visualizer</div>
+
+      <div class="src-section">Playlists</div>
+      <div id="playlist-list"><div class="src-item disabled">Build the library</div></div>
+
+      <div class="src-section">Devices</div>
+      <div id="device-list"><div class="src-item disabled">No device detected</div></div>
+    </div>
+
+    <div class="content">
+
+      <!-- PLEX SERVER / SETUP -->
+      <div class="pane active" id="pane-plex">
+        <h2>Plex Media Server</h2>
+        <p class="lead">Plexamp is only a client — play counts, ratings and playlists live on your Plex server. The app and your music can be on different machines; audio is streamed and downloaded over the Plex API.</p>
+        <div class="oauth-box">
+          <button class="aqua" id="btn-plex-oauth">Sign in with Plex</button>
+          <span class="muted">Recommended — iAmped will find your available servers.</span>
+          <div class="status" id="oauth-status"></div>
+          <a class="hidden" id="oauth-link" target="_blank" rel="noopener">Open Plex sign-in</a>
+          <div class="field hidden" id="oauth-server-wrap">
+            <label>Choose a Plex server</label>
+            <div class="oauth-server-row">
+              <select id="oauth-server"></select>
+              <button id="btn-oauth-server">Use this server</button>
+            </div>
+          </div>
+        </div>
+        <div class="manual-label">Or connect manually (optional)</div>
+        <div class="row">
+          <div class="field"><label>Server URL</label>
+            <input type="text" id="baseurl" placeholder="http://192.168.1.10:32400"></div>
+          <div class="field"><label>Plex token</label>
+            <input type="password" id="token" placeholder="X-Plex-Token"></div>
+        </div>
+        <button id="btn-connect">Connect manually</button>
+        <div class="status" id="connect-status"></div>
+        <div class="field hidden" id="section-wrap" style="margin-top:14px;">
+          <label>Music library section</label><select id="section"></select>
+        </div>
+        <hr style="border:0; border-top:1px solid #e3e3e3; margin:18px 0;">
+        <h2 style="font-size:14px;">Local library cache</h2>
+        <p class="lead">Cache metadata + playlists so you can browse, build playlists and fill devices without re-querying Plex each time.</p>
+        <button id="btn-build" disabled>Build / refresh library</button>
+        <div class="status" id="build-status"></div>
+        <div class="stats" id="lib-stats" style="margin-top:14px;"></div>
+      </div>
+
+      <!-- PLAYBACK VISUALIZER -->
+      <div class="pane" id="pane-visualizer">
+        <div class="browse-head">
+          <div><h2>Visualizer</h2>
+            <p class="lead">A lightweight Wave.js view driven by the current player.</p></div>
+          <div class="browse-actions">
+            <select id="visualizer-style">
+              <option value="bars">Bars</option>
+              <option value="shine">Shine</option>
+              <option value="dualbars">Dual bars</option>
+              <option value="wave">Wave</option>
+            </select>
+            <button id="btn-visualizer">Enable</button>
+          </div>
+        </div>
+        <div class="visualizer-shell">
+          <canvas id="visualizer-canvas"></canvas>
+          <div id="visualizer-empty">Start a track, then enable the visualizer.</div>
+        </div>
+        <div class="muted visualizer-credit">Wave.js · MIT licensed · bundled for offline use</div>
+      </div>
+
+      <!-- LIBRARY / PLAYLIST BROWSER -->
+      <div class="pane" id="pane-browse">
+        <div class="browse-head">
+          <h2 id="browse-title">Music</h2>
+          <div class="browse-actions">
+            <button id="btn-play-sel" title="Play selection"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M3 2l11 6L3 14z" fill="#333"/></svg> Play</button>
+            <button id="btn-sonic" title="Create a sonically-similar playlist from the selected track">✦ Sonic playlist</button>
+            <button id="btn-add" title="Add selection to a playlist">＋ Add to…</button>
+            <span class="menu hidden" id="add-menu"></span>
+            <button id="btn-radio" title="Build an artist radio or library station, sized to fit your device">📻 Radio…</button>
+            <div class="menu radio-panel hidden" id="radio-panel">
+              <div class="rp-row rp-tabs">
+                <button class="rp-tab active" data-mode="artist">Artist radio</button>
+                <button class="rp-tab" data-mode="station">Library station</button>
+              </div>
+              <div class="rp-row" id="rp-artist-row">
+                <input id="rp-artist" type="text" placeholder="Artist name (e.g. Gorillaz)">
+              </div>
+              <div class="rp-row hidden" id="rp-station-row">
+                <select id="rp-station"></select>
+              </div>
+              <div class="rp-row" id="rp-distance-row">
+                <label>Familiar <input id="rp-distance" type="range" min="5" max="80" value="25"> Discovery</label>
+              </div>
+              <div class="rp-row">
+                <label>Songs <input id="rp-count" type="number" min="1" placeholder="40" style="width:62px"></label>
+                <label>Max MB <input id="rp-mb" type="number" min="1" placeholder="—" style="width:62px"></label>
+                <label><input id="rp-fit" type="checkbox"> Fit device</label>
+              </div>
+              <div class="rp-row rp-actions">
+                <span id="rp-status" class="sub"></span>
+                <button class="aqua" id="rp-build">Build</button>
+              </div>
+            </div>
+            <button id="btn-del-pl" class="hidden">Delete playlist</button>
+          </div>
+        </div>
+        <div class="songlist">
+          <div class="songhead" id="browse-head-row">
+            <div class="c-play"></div>
+            <div class="c-name" data-sort="title">Name</div>
+            <div class="c-artist" data-sort="artist">Artist</div>
+            <div class="c-album" data-sort="album">Album</div>
+            <div class="c-rating" data-sort="top_rated">Rating</div>
+            <div class="c-plays" data-sort="plays">Plays</div>
+            <div class="c-time">Time</div>
+          </div>
+          <div class="songbody" id="browse-body"></div>
+        </div>
+      </div>
+
+      <!-- DEVICE -->
+      <div class="pane" id="pane-device">
+        <div class="dev-head">
+          <div class="pic"></div>
+          <div><h2 id="dev-name-h">Device</h2><div class="sub" id="dev-sub">—</div></div>
+        </div>
+        <div class="radio-row">
+          <label><input type="radio" name="dtype" value="massstorage" checked> USB MP3 player — FLAC→MP3, files + M3U</label>
+          <label><input type="radio" name="dtype" value="ipod"> Classic iPod — FLAC→AAC, iTunesDB</label>
+        </div>
+        <div class="banner hidden" id="ipod-warn">
+          Writes a non-hashed <b>iTunesDB</b> — works on iPod 1G–5.5G, mini, and nano 1G–3G.
+          <b>iPod Classic 6G/7G and nano 6G+ are not supported</b> (Apple’s hashAB checksum); use USB mode + Rockbox for those. Any existing iTunesDB is backed up first.
+        </div>
+        <div class="row">
+          <div class="field"><label>Device path</label>
+            <input type="text" id="device-path" placeholder="/Volumes/IPOD"></div>
+          <div class="field hidden" id="devname-wrap"><label>iPod name</label>
+            <input type="text" id="device-name" value="iPod"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Fill remaining space by</label>
+            <select id="strategy">
+              <option value="most_played">Most played</option>
+              <option value="top_rated">Highest rated</option>
+              <option value="recently_played">Recently played</option>
+              <option value="random">Random</option>
+              <option value="title">Alphabetical</option>
+            </select></div>
+          <div class="field"><label>Leave free (headroom MB)</label>
+            <input type="number" id="reserve" value="200" min="0" step="50"></div>
+        </div>
+        <label class="check"><input type="checkbox" id="transcode" checked>
+          Transcode lossless (FLAC/ALAC) — AAC for iPod, MP3 for USB <span class="muted" id="ffmpeg-note"></span></label>
+        <label class="check"><input type="checkbox" id="sync-artwork" checked>
+          Sync album artwork — embedded tags/cover.jpg for USB, ArtworkDB for supported iPods</label>
+        <label class="check"><input type="checkbox" id="mirror" checked>
+          Mirror this selection — remove stale files previously written by iAmped (other files are preserved)</label>
+        <label>Include playlists</label>
+        <div class="checklist" id="playlists"><div class="item muted">Build the library to load playlists.</div></div>
+        <div style="margin:14px 0 0;">
+          <button id="btn-plan">Preview fill</button>
+          <button id="btn-save-profile">Save device profile</button>
+          <button id="btn-eject">Eject</button>
+          <span id="plan-summary" style="margin-left:10px;"></span>
+        </div>
+        <div class="muted" id="plan-meta" style="font-size:11px; margin-top:6px;"></div>
+        <div class="status" id="sync-status"></div>
+        <div class="songlist hidden" id="preview-wrap" style="margin-top:12px;">
+          <div class="songhead">
+            <div class="c-num">#</div><div class="c-name">Name</div>
+            <div class="c-artist">Artist</div><div class="c-album">Album</div>
+            <div class="c-plays">Plays</div><div class="c-time">Size</div>
+          </div>
+          <div class="songbody" id="preview"></div>
+        </div>
+        <div class="review-actions hidden" id="review-actions">
+          <label><input type="checkbox" id="review-all" checked> Select all changes</label>
+          <span class="muted">Uncheck individual additions, updates, or removals before Sync.</span>
+        </div>
+        <div class="songlist hidden" id="review-wrap">
+          <div class="songhead">
+            <div class="c-check"></div><div class="c-action">Action</div>
+            <div class="c-name">Name</div><div class="c-artist">Artist</div>
+            <div class="c-album">Album</div><div class="c-size">Size</div>
+          </div>
+          <div class="songbody review-list" id="review-list"></div>
+        </div>
+
+        <div class="device-tools">
+          <div>
+            <b>Rollback</b>
+            <select id="backup-select"><option value="">No snapshots yet</option></select>
+            <button id="btn-restore">Restore selected backup</button>
+          </div>
+          <div>
+            <b>Library matching</b>
+            <button id="btn-match">Match files without Plex IDs</button>
+            <span class="muted" id="match-status"></span>
+          </div>
+        </div>
+
+        <hr style="border:0; border-top:1px solid #e3e3e3; margin:18px 0;">
+        <h2 style="font-size:14px;">Read back from device → Plex</h2>
+        <p class="lead" style="margin-top:0;">Pull plays &amp; ratings the device accrued and feed them into Plex. Ratings only fill blanks (an existing Plex rating is never overwritten). Preview first — nothing is written until you Apply.</p>
+        <div class="radio-row">
+          <label><input type="checkbox" id="rb-plays" checked> Play counts</label>
+          <label><input type="checkbox" id="rb-ratings" checked> Ratings</label>
+          <label><input type="checkbox" id="rb-reset" checked> Reset device after import</label>
+        </div>
+        <div style="margin-top:8px;">
+          <button id="btn-readback">Read from device</button>
+          <button id="btn-readback-apply" class="aqua hidden">Apply to Plex</button>
+          <span id="readback-summary" style="margin-left:10px;"></span>
+        </div>
+        <div class="status" id="readback-status"></div>
+        <div class="songlist hidden" id="readback-wrap" style="margin-top:12px;">
+          <div class="songhead">
+            <div class="c-num"></div><div class="c-name">Track</div>
+            <div class="c-artist">Artist</div><div class="c-plays">+Plays</div>
+            <div class="c-rating">Rating</div>
+          </div>
+          <div class="songbody" id="readback-list"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="bottombar">
+    <button class="round-btn" id="btn-newpl" title="New playlist from selection">+</button>
+    <div id="bottom-info" class="muted">—</div>
+    <div class="capacity hidden" id="capacity"></div>
+    <div class="cap-legend hidden" id="cap-legend"></div>
+    <div class="sync-progress hidden" id="sync-progress">
+      <div class="sp-text"><span id="sp-label">Syncing…</span><span class="sp-count" id="sp-count"></span></div>
+      <div class="sp-bar"><div id="sp-fill"></div></div>
+    </div>
+    <div class="sync-actions hidden" id="sync-actions"><button class="aqua" id="btn-sync" disabled>Sync</button></div>
+  </div>
+
+</div>
+<audio id="player"></audio>
+<script src="vendor/wave.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
