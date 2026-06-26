@@ -266,10 +266,210 @@ async function buildLibrary() {
 }
 
 // ---------------------------------------------------------------- sidebar
-const ipodSvg = '<svg viewBox="0 0 16 16"><rect x="3" y="1" width="10" height="14" rx="2" fill="none" stroke="#5f6b7e"/><rect x="4.5" y="2.5" width="7" height="5"/><circle cx="8" cy="11" r="2.2" fill="none" stroke="#5f6b7e"/></svg>';
 const ejectSvg = '<svg viewBox="0 0 16 16"><path d="M8 3l5 6H3zM3 11h10v2H3z"/></svg>';
 const plSvg = '<svg viewBox="0 0 16 16"><path d="M1 3h10v1.6H1zM1 6h10v1.6H1zM1 9h6v1.6H1zM12 7l3 2-3 2z"/></svg>';
 const sonicSvg = '<svg viewBox="0 0 16 16"><path d="M1 8h2l1-4 2 8 2-10 2 12 2-6h2"/><path d="M1 8h2l1-4 2 8 2-10 2 12 2-6h2" fill="none" stroke="#5f6b7e" stroke-width="1.1"/></svg>';
+
+function deviceText(d) {
+  return [d.ipod_model, d.ipod_generation, d.model, d.name, d.transport]
+    .filter(Boolean).join(" ").toLowerCase();
+}
+function isTruthy(v) { return v === true || v === "true"; }
+function deviceIconKind(d) {
+  const s = deviceText(d);
+  if (isTruthy(d.is_ipod)) {
+    if (s.includes("touch")) return "ipod-touch";
+    if (s.includes("shuffle")) {
+      if (s.includes("1st")) return "shuffle-1";
+      if (s.includes("3rd")) return "shuffle-3";
+      if (s.includes("4th")) return "shuffle-4";
+      return "shuffle-2";
+    }
+    if (s.includes("nano")) {
+      if (s.includes("1st")) return "nano-1";
+      if (s.includes("2nd")) return "nano-2";
+      if (s.includes("3rd")) return "nano-3";
+      if (s.includes("4th")) return "nano-4";
+      if (s.includes("5th")) return "nano-5";
+      if (s.includes("6th")) return "nano-6";
+      if (s.includes("7th")) return "nano-7";
+      return "nano-4";
+    }
+    if (s.includes("mini")) return "mini";
+    if (s.includes("classic")) return "classic";
+    if (s.includes("photo") || s.includes("colour") || s.includes("color")) return "photo";
+    if (s.includes("5.5") || s.includes("5th") || s.includes("video")) return "video";
+    if (s.includes("4th")) return "ipod-4";
+    if (s.includes("3rd")) return "ipod-3";
+    if (s.includes("2nd")) return "ipod-2";
+    if (s.includes("1st")) return "ipod-1";
+    return "classic";
+  }
+  if (s.includes("creative") || s.includes("zen") || s.includes("muvo") || s.includes("nomad")) {
+    if (s.includes("vision")) return "creative-vision";
+    if (s.includes("micro")) return "creative-micro";
+    if (s.includes("stone")) return "creative-stone";
+    if (s.includes("x-fi") || s.includes("xfi")) return "creative-xfi";
+    if (s.includes("muvo")) return "creative-muvo";
+    if (s.includes("nomad") || s.includes("jukebox")) return "creative-nomad";
+    return "creative-zen";
+  }
+  return "usb";
+}
+function iconSvg(body, className = "") {
+  return `<svg class="device-icon ${className}" viewBox="0 0 64 88" aria-hidden="true">${body}</svg>`;
+}
+function bodyBox(aspect, maxW = 56, maxH = 82) {
+  let h = maxH, w = h * aspect;
+  if (w > maxW) { w = maxW; h = w / aspect; }
+  return { x: 32 - w / 2, y: 44 - h / 2, w, h };
+}
+const rr = (n) => Number(n.toFixed(2));
+function rectAttrs(b) {
+  return `x="${rr(b.x)}" y="${rr(b.y)}" width="${rr(b.w)}" height="${rr(b.h)}"`;
+}
+function screenRect(b, left, top, width, height) {
+  return {
+    x: b.x + b.w * left, y: b.y + b.h * top,
+    w: b.w * width, h: b.h * height,
+  };
+}
+function wheelPod({
+  aspect = .60, body = "#f3f3ee", screen = "#b7c6bf", wheel = .24,
+  screenTop = .08, screenW = .58, screenH = .25, controls = "", center,
+  radius = 5, maxW = 56, maxH = 82,
+} = {}) {
+  const b = bodyBox(aspect, maxW, maxH);
+  const s = screenRect(b, (1 - screenW) / 2, screenTop, screenW, screenH);
+  const wr = Math.min(b.w, b.h) * wheel;
+  const cx = 32, cy = b.y + b.h * .72;
+  return iconSvg(`<rect ${rectAttrs(b)} rx="${radius}" fill="${body}" stroke="#5f656b"/>
+    <rect ${rectAttrs(s)} rx="2" fill="${screen}" stroke="#677681"/>
+    ${controls}<circle cx="${cx}" cy="${rr(cy)}" r="${rr(wr)}" fill="#f7f7f3" stroke="#9c9c9c"/>
+    <circle cx="${cx}" cy="${rr(cy)}" r="${rr(wr * .32)}" fill="${center || body}" stroke="#b6b6b2"/>`);
+}
+function deviceIcon(d, size = "sidebar") {
+  const kind = deviceIconKind(d);
+  const scaleClass = size === "inspector" ? "device-icon-large" : "device-icon-small";
+  const color = {
+    "nano-2": "#8db8d9", "nano-4": "#b25c84", "nano-5": "#d68535",
+    "nano-7": "#6aa7c8", "mini": "#a8c784", "shuffle-2": "#83aecd",
+    "shuffle-4": "#d7848d", "creative-micro": "#55afa5",
+  }[kind];
+  const wrap = (svg) => svg.replace("device-icon ", `device-icon ${scaleClass} `);
+  if (kind === "ipod-1" || kind === "ipod-2") {
+    const buttons = '<circle cx="20.8" cy="45" r="1.9" fill="#929292"/><circle cx="43.2" cy="45" r="1.9" fill="#929292"/><circle cx="32" cy="34.7" r="1.9" fill="#929292"/><circle cx="32" cy="55.3" r="1.9" fill="#929292"/>';
+    return wrap(wheelPod({ aspect: .61, screenH: .20, wheel: .30, controls: buttons }));
+  }
+  if (kind === "ipod-3") {
+    return wrap(wheelPod({ aspect: .60, screenH: .21, wheel: .27,
+      controls: '<rect x="19" y="35" width="26" height="4.6" rx="2.3" fill="#d7d7d2"/><circle cx="22.5" cy="37.3" r="1.3" fill="#888"/><circle cx="29" cy="37.3" r="1.3" fill="#888"/><circle cx="35.5" cy="37.3" r="1.3" fill="#888"/><circle cx="42" cy="37.3" r="1.3" fill="#888"/>' }));
+  }
+  if (kind === "ipod-4" || kind === "photo") {
+    return wrap(wheelPod({ aspect: .60, screen: kind === "photo" ? "#98c6de" : "#b8c4bb", wheel: .26 }));
+  }
+  if (kind === "video" || kind === "classic") {
+    const classic = kind === "classic";
+    return wrap(wheelPod({ aspect: .60, body: classic ? "#cfd3d5" : "#f3f3ee",
+      screen: "#20262d", screenW: .64, screenH: .31, wheel: .25,
+      center: classic ? "#cfd3d5" : "#f3f3ee" }));
+  }
+  if (kind === "mini") {
+    return wrap(wheelPod({ aspect: .56, body: color, screen: "#bdcbb9", screenW: .58,
+      screenH: .21, wheel: .27, center: color, radius: 6 }));
+  }
+  if (kind === "nano-1") {
+    return wrap(wheelPod({ aspect: .46, body: "#f5f5ef", screen: "#bad0df",
+      screenW: .68, screenH: .23, wheel: .28, radius: 4 }));
+  }
+  if (kind === "nano-2") {
+    return wrap(wheelPod({ aspect: .46, body: color, screen: "#bed5df",
+      screenW: .68, screenH: .24, wheel: .28, center: color, radius: 4 }));
+  }
+  if (kind === "nano-3") {
+    return wrap(wheelPod({ aspect: .74, body: "#91abc4", screen: "#1f252b",
+      screenTop: .11, screenW: .74, screenH: .35, wheel: .20, center: "#91abc4", radius: 6 }));
+  }
+  if (kind === "nano-4" || kind === "nano-5") {
+    return wrap(wheelPod({ aspect: .42, body: color, screen: "#1f252b",
+      screenW: .74, screenH: kind === "nano-5" ? .36 : .31, wheel: .31,
+      center: color, radius: 8, controls: kind === "nano-5" ? '<circle cx="39.5" cy="74" r="1.6" fill="#34383e"/>' : "" }));
+  }
+  if (kind === "nano-6") {
+    const b = bodyBox(1.04, 50, 48);
+    const s = screenRect(b, .12, .12, .76, .68);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="7" fill="#434a52" stroke="#242a30"/>
+      <rect ${rectAttrs(s)} rx="2" fill="#9cc5dd"/><rect x="${rr(b.x + b.w * .12)}" y="${rr(b.y + b.h + 3)}" width="${rr(b.w * .76)}" height="5" rx="2.5" fill="#a6acb2" stroke="#646a70"/>`));
+  }
+  if (kind === "nano-7") {
+    const b = bodyBox(.52, 46, 82);
+    const s = screenRect(b, .12, .08, .76, .73);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="5" fill="${color}" stroke="#53646d"/>
+      <rect ${rectAttrs(s)} rx="2" fill="#1e242b"/><circle cx="32" cy="${rr(b.y + b.h * .91)}" r="3" fill="#e8edf0"/>`));
+  }
+  if (kind === "shuffle-1") {
+    const b = bodyBox(.30, 26, 82);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="3" fill="#f5f5ef" stroke="#777"/>
+      <circle cx="32" cy="${rr(b.y + b.h * .42)}" r="${rr(b.w * .47)}" fill="#ececea" stroke="#a0a0a0"/>
+      <circle cx="32" cy="${rr(b.y + b.h * .42)}" r="3" fill="#fff"/><rect x="${rr(b.x + b.w * .2)}" y="${rr(b.y + b.h * .82)}" width="${rr(b.w * .6)}" height="7" rx="2" fill="#d8d8d8"/>`));
+  }
+  if (kind === "shuffle-3") {
+    const b = bodyBox(.25, 20, 76);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="5" fill="#9aa1a8" stroke="#555b61"/>
+      <rect x="${rr(b.x + b.w * .27)}" y="${rr(b.y + b.h * .12)}" width="${rr(b.w * .46)}" height="${rr(b.h * .66)}" rx="3" fill="#c9ced2"/>
+      <circle cx="32" cy="${rr(b.y + b.h * .88)}" r="2" fill="#575e65"/>`));
+  }
+  if (kind === "shuffle-2" || kind === "shuffle-4") {
+    const b = bodyBox(.92, 42, 46);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="6" fill="${color || "#c8ccd0"}" stroke="#687078"/>
+      <circle cx="32" cy="${rr(b.y + b.h * .48)}" r="${rr(Math.min(b.w, b.h) * .32)}" fill="#edf0f1" stroke="#9da4a8"/>
+      <circle cx="32" cy="${rr(b.y + b.h * .48)}" r="3" fill="${color || "#c8ccd0"}"/><rect x="${rr(b.x + b.w * .14)}" y="${rr(b.y + b.h + 3)}" width="${rr(b.w * .72)}" height="5" rx="2.5" fill="#aab0b6"/>`));
+  }
+  if (kind === "ipod-touch") {
+    const b = bodyBox(.55, 44, 82);
+    const s = screenRect(b, .08, .09, .84, .75);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="7" fill="#16191d" stroke="#444"/>
+      <rect ${rectAttrs(s)} rx="2" fill="#202a35"/><path d="M${rr(s.x + 2)} ${rr(s.y + s.h * .72)}h${rr(s.w - 4)}v${rr(s.h * .23)}h${rr(4 - s.w)}z" fill="#476a86"/>
+      <circle cx="32" cy="${rr(b.y + b.h * .93)}" r="3" fill="#0b0d10" stroke="#777"/>`));
+  }
+  if (kind === "creative-muvo") {
+    return wrap(iconSvg(`<rect x="6" y="34" width="38" height="17" rx="4" fill="#2e3338" stroke="#111"/>
+      <rect x="44" y="35.5" width="14" height="14" rx="2" fill="#b9bdc0" stroke="#6d7378"/><rect x="12" y="38" width="15" height="6" rx="1" fill="#8fb0b8"/><circle cx="35" cy="42.5" r="4.2" fill="#d5d8da"/>`));
+  }
+  if (kind === "creative-stone") {
+    return wrap(iconSvg(`<rect x="8" y="30" width="48" height="28" rx="14" fill="#2f3439" stroke="#111"/>
+      <circle cx="32" cy="44" r="10.5" fill="#d9dcde" stroke="#8b9298"/><circle cx="32" cy="44" r="3" fill="#2f3439"/>`));
+  }
+  if (kind === "creative-micro") {
+    const b = bodyBox(.61, 48, 80);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="7" fill="${color}" stroke="#335d59"/>
+      <rect x="${rr(b.x + b.w * .18)}" y="${rr(b.y + b.h * .12)}" width="${rr(b.w * .64)}" height="${rr(b.h * .28)}" rx="2" fill="#c4d8ce"/>
+      <rect x="${rr(b.x + b.w * .38)}" y="${rr(b.y + b.h * .5)}" width="${rr(b.w * .24)}" height="${rr(b.h * .28)}" rx="5" fill="#e5f0ed"/><circle cx="32" cy="${rr(b.y + b.h * .88)}" r="2" fill="#e5f0ed"/>`));
+  }
+  if (kind === "creative-vision") {
+    const b = bodyBox(.596, 52, 82);
+    const s = screenRect(b, .14, .12, .66, .36);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="5" fill="#23272d" stroke="#0d0f12"/>
+      <rect ${rectAttrs(s)} rx="2" fill="#5d83a1"/>
+      <rect x="${rr(b.x + b.w * .84)}" y="${rr(b.y + b.h * .18)}" width="${rr(b.w * .08)}" height="${rr(b.h * .42)}" rx="2" fill="#d6d8d9"/>
+      <circle cx="${rr(b.x + b.w * .38)}" cy="${rr(b.y + b.h * .78)}" r="${rr(b.w * .16)}" fill="#d6d8d9"/>
+      <circle cx="${rr(b.x + b.w * .69)}" cy="${rr(b.y + b.h * .73)}" r="2" fill="#74a5d3"/><circle cx="${rr(b.x + b.w * .76)}" cy="${rr(b.y + b.h * .67)}" r="2" fill="#74a5d3"/><circle cx="${rr(b.x + b.w * .78)}" cy="${rr(b.y + b.h * .79)}" r="2" fill="#74a5d3"/>`));
+  }
+  if (kind === "creative-nomad") {
+    const b = bodyBox(.95, 56, 60);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="8" fill="#b8bab8" stroke="#606468"/>
+      <rect x="${rr(b.x + b.w * .14)}" y="${rr(b.y + b.h * .17)}" width="${rr(b.w * .72)}" height="${rr(b.h * .25)}" rx="2" fill="#9ba899"/>
+      <circle cx="${rr(b.x + b.w * .31)}" cy="${rr(b.y + b.h * .72)}" r="${rr(b.h * .12)}" fill="#34383c"/><circle cx="${rr(b.x + b.w * .69)}" cy="${rr(b.y + b.h * .72)}" r="${rr(b.h * .12)}" fill="#34383c"/>`));
+  }
+  if (kind === "creative-zen" || kind === "creative-xfi") {
+    const b = bodyBox(.69, 52, 76);
+    const s = screenRect(b, .12, .11, .76, .48);
+    return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="5" fill="#1d2228" stroke="#0b0d10"/>
+      <rect ${rectAttrs(s)} rx="2" fill="#5b86a8"/><rect x="${rr(b.x + b.w * .18)}" y="${rr(b.y + b.h * .72)}" width="${rr(b.w * .39)}" height="${rr(b.h * .14)}" rx="2" fill="#d6d9dc"/><circle cx="${rr(b.x + b.w * .76)}" cy="${rr(b.y + b.h * .79)}" r="${rr(b.w * .12)}" fill="#d6d9dc"/>`));
+  }
+  return wrap(iconSvg(`<rect x="8" y="31" width="48" height="25" rx="4" fill="#d5d8dc" stroke="#6f7780"/>
+    <rect x="15" y="37" width="22" height="8" rx="2" fill="#8fb0be"/><circle cx="47" cy="43.5" r="5" fill="#f1f1ee" stroke="#8d9398"/>`));
+}
 
 async function loadSidebar() {
   STATE.playlists = await api("/api/playlists");
@@ -320,8 +520,8 @@ async function loadDevices() {
   if (!vols.length) { list.innerHTML = '<div class="src-item disabled">No device detected</div>'; return; }
   const noteSvg = '<svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>';
   list.innerHTML = vols.map((v) => `
-    <div class="src-item device" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-free="${v.free}" data-total="${v.total}" data-name="${esc(v.name)}" data-model="${esc(v.ipod_model || "")}"${v.ipod_model ? ` title="${esc(v.ipod_model)}"` : ""}>
-      ${v.is_ipod ? ipodSvg : '<svg viewBox="0 0 16 16"><rect x="1" y="3" width="14" height="10" rx="1.5" fill="none" stroke="#5f6b7e"/></svg>'}
+    <div class="src-item device" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-free="${v.free}" data-total="${v.total}" data-name="${esc(v.name)}" data-ipod-model="${esc(v.ipod_model || "")}" data-generation="${esc(v.ipod_generation || "")}" data-device-model="${esc(v.model || "")}" data-transport="${esc(v.transport || "")}"${(v.ipod_model || v.model) ? ` title="${esc(v.ipod_model || v.model)}"` : ""}>
+      ${deviceIcon(v)}
       ${esc(v.name)}<span class="eject">${ejectSvg}</span></div>
     <div class="src-subitem device-music" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-name="${esc(v.name)}">
       ${noteSvg}Music on device</div>`).join("");
@@ -776,11 +976,15 @@ async function selectDevice(el) {
   el.classList.add("selected");
   openDeviceInspector();
   const path = el.dataset.path, isIpod = el.dataset.ipod === "true";
-  const model = el.dataset.model;
+  const model = el.dataset.ipodModel || el.dataset.deviceModel;
   $("device-path").value = path; $("dev-name-h").textContent = el.dataset.name;
   STATE.currentDevice = {
     path, type: isIpod ? "ipod" : "massstorage", name: el.dataset.name,
+    is_ipod: isIpod, ipod_model: el.dataset.ipodModel,
+    ipod_generation: el.dataset.generation, model: el.dataset.deviceModel,
+    transport: el.dataset.transport,
   };
+  $("dev-icon").innerHTML = deviceIcon(STATE.currentDevice, "inspector");
   STATE.manualKeys = null; STATE.manualPlaylistIds = null;
   STATE.transferMaxTracks = null; STATE.review = [];
   $("review-list").innerHTML = "";
@@ -1234,6 +1438,14 @@ function visualizerAnimation(wave) {
   if (style === "wave") return new wave.animations.Wave({ lineColor: "#80c4ff", lineWidth: 3 });
   return new wave.animations.Lines({ ...common, count: 64, lineWidth: 3 });
 }
+function ensureVisualizerAnalyser() {
+  const viz = STATE.visualizer;
+  if (!viz) return;
+  if (!viz._interacted && !player.paused) {
+    try { viz.connectAnalyser(); } catch (_) {}
+  }
+  if (viz._audioContext?.state === "suspended") viz._audioContext.resume().catch(() => {});
+}
 function enableVisualizer() {
   if (!window.Wave) { lcd("Visualizer unavailable", "Wave.js did not load"); return; }
   STATE.visualizerEnabled = true;
@@ -1244,11 +1456,13 @@ function enableVisualizer() {
   $("lcd-viz-toggle").setAttribute("aria-pressed", "true");
   $("visualizer-empty").textContent = "Visualizer enabled in the playback display.";
   $("btn-visualizer").textContent = "Disable";
+  resizeVisualizer();
+  if (!STATE.visualizer) STATE.visualizer = new Wave(player, $("visualizer-canvas"));
+  STATE.visualizer.clearAnimations();
+  STATE.visualizer.addAnimation(visualizerAnimation(STATE.visualizer));
+  ensureVisualizerAnalyser();
   requestAnimationFrame(() => {
     resizeVisualizer();
-    if (!STATE.visualizer) STATE.visualizer = new Wave(player, $("visualizer-canvas"));
-    STATE.visualizer.clearAnimations();
-    STATE.visualizer.addAnimation(visualizerAnimation(STATE.visualizer));
   });
 }
 function disableVisualizer() {
@@ -1269,6 +1483,9 @@ function toggleVisualizer() {
 $("btn-visualizer").onclick = toggleVisualizer;
 $("lcd-viz-toggle").onclick = toggleVisualizer;
 $("visualizer-style").onchange = () => { if (STATE.visualizerEnabled) enableVisualizer(); };
+player.addEventListener("play", () => {
+  if (STATE.visualizerEnabled) ensureVisualizerAnalyser();
+});
 $("volume").oninput = () => { player.volume = Number($("volume").value); };
 window.addEventListener("resize", resizeVisualizer);
 
