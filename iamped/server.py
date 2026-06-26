@@ -15,7 +15,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from . import (artwork, config, device_management, filler, inventory, matcher,
                plex_client, readback)
 from .library import Library
-from .sync import BACKENDS, free_bytes, list_volumes, target_format, transcode
+from .sync import (BACKENDS, free_bytes, list_volumes, target_format,
+                   total_bytes, transcode)
 from .sync import device_state, itunesdb
 from .sync.base import have_ffmpeg
 
@@ -131,6 +132,55 @@ def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
     return orig, orig_ext
 
 
+def _resolve_capability(params: dict):
+    """Auto-detect the transport + on-disk layout for the target device, with a
+    saved/explicit ``transport``/``layout`` override taking precedence.
+
+    Detection mirrors how MediaMonkey/iTunes pick a transport without asking:
+    iPods use the iTunes DB, MTP players are handed indexed tracks, flat-scan
+    USB players (Creative MuVo) get a one-level layout, and everything else
+    defaults to flat for maximum compatibility.
+    """
+    from .devices import capabilities, list_devices
+    override = {k: params[k] for k in ("transport", "layout")
+               if params.get(k) in (
+                   capabilities.LAYOUT_FLAT, capabilities.LAYOUT_NESTED,
+                   capabilities.TRANSPORT_UMS, capabilities.TRANSPORT_MTP,
+                   capabilities.TRANSPORT_IPOD)}
+    path = params.get("device_path")
+    busloc = params.get("mtp_busloc")
+    try:
+        for dev in list_devices(include_raw=False):
+            if (dev.mountpoint and dev.mountpoint == path) or \
+                    (busloc and dev.mtp_busloc == busloc):
+                return capabilities.resolve(dev, override)
+    except Exception:  # noqa: BLE001 - detection must never break a sync
+        pass
+    # Device not enumerable (unmounted, or called before a scan): honour an
+    # explicit override, else fall back to the safe flat default.
+    return capabilities.Capability(
+        transport=override.get("transport", capabilities.TRANSPORT_UMS),
+        layout=override.get("layout", capabilities.LAYOUT_FLAT),
+        reason="default", source="override" if override else "auto")
+
+
+def _reserve_bytes(path: str, params: dict) -> int:
+    """Headroom to keep free on the device, capped for small players.
+
+    The configured reserve (default 200 MB) is sensible for iPods and large
+    USB drives, but on a sub-1 GB player like a Creative MuVo it can swallow
+    most of the disk — the sync budget is ``free - reserve``, so a flat 200 MB
+    on a 495 MB device collapses the budget to near-zero and every track gets
+    "skipped for space". Cap the reserve at 5% of total capacity so small
+    devices keep a sane, proportional amount of headroom instead.
+    """
+    requested = int(params.get("reserve_mb", 200)) * 1024 * 1024
+    total = total_bytes(path)
+    if total:
+        return min(requested, int(total * 0.05))
+    return requested
+
+
 def _device_plan(params: dict) -> dict:
     """Build the desired device state and its incremental diff.
 
@@ -181,7 +231,7 @@ def _device_plan(params: dict) -> dict:
         except Exception:  # noqa: BLE001 - best-effort foreign-file protection
             exclude_meta = set()
 
-    reserve = int(params.get("reserve_mb", 200)) * 1024 * 1024
+    reserve = _reserve_bytes(path, params)
     fmt = target_format(dtype)
     bitrate_k = int(params.get("target_bitrate_k")
                     or (256 if fmt == "aac" else 320))
@@ -374,7 +424,7 @@ def _sync_job_inner(job, params):
         if "target_reclaim_bytes" not in tx:
             add_bytes = sum(int(t.get("_size") or 0) for t in tracks)
             writable_free = max(
-                free_bytes(path) - int(params.get("reserve_mb", 200)) * 1024 * 1024,
+                free_bytes(path) - _reserve_bytes(path, params),
                 0)
             tx["target_reclaim_bytes"] = max(add_bytes - writable_free, 0)
             device_state.checkpoint(path, dtype, tx)
@@ -387,7 +437,7 @@ def _sync_job_inner(job, params):
     if is_ipod:
         backend = backend_cls(path, params.get("device_name") or "iPod")
     else:
-        backend = backend_cls(path)
+        backend = backend_cls(path, _resolve_capability(params).layout)
     backend.prepare()
 
     job["message"] = "Reading what's already on the device…"
@@ -492,6 +542,88 @@ def _sync_job(job, params):
     with device_management.device_lock(
             params["device_path"], params["device_type"]):
         _sync_job_inner(job, params)
+
+
+# --------------------------------------------------------------------------- MTP
+_MTP_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _mtp_lock(busloc: str) -> threading.Lock:
+    return _MTP_LOCKS.setdefault(busloc or "mtp", threading.Lock())
+
+
+def _mtp_sync_job_inner(job, params):
+    """Push tracks to an MTP player (Creative Zen-class) via libmtp.
+
+    MTP devices index tracks into their own database, so this is additive and
+    deliberately simpler than the mass-storage path: no on-device manifest,
+    transactions, or backups (the device manages its own library). What we've
+    sent is recorded host-side so reruns don't duplicate.
+    """
+    from .sync import mtp
+    server = get_server()
+    lib = _lib()
+    backend = mtp.MTPBackend(params.get("mtp_busloc"),
+                             folder=params.get("mtp_folder") or "Music")
+    job["phase"] = "planning"
+    job["message"] = "Checking the MTP player…"
+    backend.prepare()                       # raises MTPError if libmtp absent
+    total, free = mtp.storage_free()
+    if total <= 0:
+        # A connected MTP device always reports a positive MaxCapacity; zero
+        # means libmtp couldn't reach the player.
+        raise mtp.MTPError(
+            "Couldn't reach the MTP player — reconnect it, make sure no other "
+            "program (Music app / Android File Transfer) holds it, then scan "
+            "again.")
+    capacity = free or total
+    reserve = int(params.get("reserve_mb", 0)) * 1024 * 1024
+    fmt, bitrate_k = "mp3", int(params.get("target_bitrate_k") or 320)
+    tl = bool(params.get("transcode_lossless", True))
+    existing = backend.existing_keys()
+
+    if "rating_keys" in params:
+        plan = filler.explicit_plan(
+            lib, [str(k) for k in params.get("rating_keys", [])], capacity,
+            reserve, tl, fmt, bitrate_k, params.get("max_tracks"))
+    else:
+        plan = filler.plan(
+            lib, capacity, reserve, params.get("fill_strategy", "most_played"),
+            params.get("playlist_ids", []), tl, params.get("max_tracks"), fmt,
+            exclude_keys=existing, target_bitrate_k=bitrate_k,
+            fill_remaining=not bool(params.get("playlist_only")))
+
+    tracks = [t for t in plan["tracks"] if str(t["rating_key"]) not in existing]
+    job["total"] = len(tracks)
+    job["done"] = 0
+    job["phase"] = "syncing"
+    for i, tr in enumerate(tracks):
+        src, ext = materialize(server, lib, tr, tl, fmt, bitrate_k)
+        backend.add_track(tr, src, ext, None)
+        job["done"] = i + 1
+        job["message"] = f"{tr.get('artist', '')} – {tr.get('title', '')}"
+
+    job["phase"] = "finalizing"
+    backend.finalize()
+    job["result"] = {
+        "tracks_added": len(tracks),
+        "tracks_total": len(existing) + len(tracks),
+        "transport": "mtp",
+        "bytes": sum(int(t.get("_size") or 0) for t in tracks),
+    }
+    job["message"] = (f"Sent {len(tracks)} track(s) to the MTP player "
+                      f"→ {len(existing) + len(tracks)} total.")
+
+
+def _mtp_sync_job(job, params):
+    busloc = params.get("mtp_busloc")
+    lock = _mtp_lock(busloc)
+    if not lock.acquire(blocking=False):
+        raise RuntimeError("This MTP player is already being written by iAmped.")
+    try:
+        _mtp_sync_job_inner(job, params)
+    finally:
+        lock.release()
 
 
 # --------------------------------------------------------------------------- routes
@@ -898,15 +1030,26 @@ def api_stream(rk):
 
 @app.get("/api/volumes")
 def api_volumes():
-    vols = [{"path": v.path, "name": v.name, "total": v.total, "free": v.free,
-             "is_ipod": v.is_ipod, "fs": v.fs, "mounted": v.mounted,
-             "writable": v.writable, "ipod_format": v.ipod_format,
-             "ipod_model": v.ipod_model, "ipod_generation": v.ipod_generation,
-             "needs_conversion": v.needs_conversion, "raw_path": v.raw_path,
-             "note": v.note,
-             "device_id": device_management.device_id(
-                 v.path, "ipod" if v.is_ipod else "massstorage")}
-            for v in list_volumes()]
+    # MTP scanning is slow and seizes the device, so it's opt-in via ?mtp=1
+    # (a user-triggered "scan for MTP players"), never on the hot poll path.
+    from .devices import capabilities, list_devices
+    include_mtp = request.args.get("mtp") in ("1", "true", "yes")
+    vols = []
+    for d in list_devices(include_mtp=include_mtp):
+        cap = capabilities.classify(d)
+        path = d.mountpoint or d.raw_path or d.id
+        vols.append({
+            "path": path, "name": d.name, "total": d.total, "free": d.free,
+            "is_ipod": d.is_ipod, "fs": d.fs, "mounted": d.mounted,
+            "writable": d.writable, "ipod_format": d.ipod_format,
+            "ipod_model": d.ipod_model, "ipod_generation": d.ipod_generation,
+            "needs_conversion": d.needs_conversion, "raw_path": d.raw_path,
+            "note": d.note, "model": d.model,
+            "transport": cap.transport, "layout": cap.layout,
+            "capability_reason": cap.reason, "mtp_busloc": d.mtp_busloc,
+            "device_id": device_management.device_id(
+                path, "ipod" if d.is_ipod else "massstorage"),
+        })
     return jsonify(vols)
 
 
@@ -998,6 +1141,12 @@ def api_plan():
 @app.post("/api/sync")
 def api_sync():
     p = request.json or {}
+    # MTP players have no filesystem path — they're addressed by bus location.
+    if p.get("device_type") == "mtp" or p.get("transport") == "mtp" \
+            or p.get("mtp_busloc"):
+        if not p.get("mtp_busloc"):
+            return jsonify({"error": "No MTP player selected."}), 400
+        return jsonify({"job": start_job(_mtp_sync_job, p)})
     if not os.path.isdir(p.get("device_path", "")):
         return jsonify({"error": "Device path does not exist."}), 400
     return jsonify({"job": start_job(_sync_job, p)})

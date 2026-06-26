@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 
@@ -61,6 +62,47 @@ def _capacity(path: str) -> tuple[int, int]:
         return 0, 0
 
 
+def _whole_disk_node(raw_path: str) -> str:
+    """Strip a partition suffix to the parent disk (/dev/disk5s1 → /dev/disk5,
+    /dev/sdb1 → /dev/sdb). The USB product name lives on the whole disk."""
+    for rx, repl in (
+        (r"^(/dev/disk\d+)s\d+$", r"\1"),
+        (r"^(/dev/nvme\d+n\d+)p\d+$", r"\1"),
+        (r"^(/dev/mmcblk\d+)p\d+$", r"\1"),
+        (r"^(/dev/(?:sd|hd|vd|xvd)[a-z]+)\d+$", r"\1"),
+    ):
+        if re.match(rx, raw_path):
+            return re.sub(rx, repl, raw_path)
+    return raw_path
+
+
+def _usb_model(raw_path: str | None) -> str:
+    """The USB product / media name for a block device (e.g. "MuVo TX FM").
+
+    Used to auto-pick a sync layout. Best-effort: returns "" on any failure so
+    device enumeration never breaks.
+    """
+    if not raw_path:
+        return ""
+    whole = _whole_disk_node(raw_path)
+    try:
+        if _SYSTEM == "Darwin":
+            out = subprocess.run(
+                ["diskutil", "info", whole],
+                capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                if "Device / Media Name:" in line:
+                    return line.split(":", 1)[1].strip()
+        elif _SYSTEM == "Linux":
+            out = subprocess.run(
+                ["lsblk", "-ndo", "MODEL", whole],
+                capture_output=True, text=True, timeout=10).stdout
+            return out.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
 def _make(mountpoint: str, name: str, fs: str, raw_path: str | None = None) -> Device:
     total, free = _capacity(mountpoint)
     ipod = _is_ipod(mountpoint)
@@ -75,6 +117,7 @@ def _make(mountpoint: str, name: str, fs: str, raw_path: str | None = None) -> D
         mounted=True,
         is_ipod=ipod,
         ipod_format=_canon_fs(fs) if ipod else None,
+        model="" if ipod else _usb_model(raw_path),
     )
     if ipod:
         usb = usbdetect.match(raw_path=raw_path, mountpoint=mountpoint)
