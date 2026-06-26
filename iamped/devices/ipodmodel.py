@@ -122,6 +122,25 @@ def model_from_usb_pid(pid: int) -> Optional[str]:
     return _USB_PID_MODELS.get(pid)
 
 
+def is_video_capable(label: Optional[str]) -> bool:
+    """Does this iPod generation play video *and* support iAmped's iTunesDB
+    sync? True for the click-wheel video iPods (5G/5.5G), iPod classic, and the
+    nano 3G–5G. False for everything else, including the iPod touch — it plays
+    video but uses Apple's locked iOS sync, not iTunesDB, so we can't write it
+    (a deferred follow-up). Accepts a friendly generation label like
+    ``"iPod (5th generation, video)"`` or ``"iPod nano (4th generation)"``."""
+    s = (label or "").lower()
+    if not s or "shuffle" in s or "mini" in s or "touch" in s:
+        return False
+    if "nano" in s:
+        return any(g in s for g in
+                   ("3rd generation", "4th generation", "5th generation"))
+    if "classic" in s:
+        return True
+    # full-size click-wheel video iPod (5G / 5.5G) — labelled "…, video"
+    return "video" in s
+
+
 def _device_dir(mountpoint: str) -> Optional[str]:
     for name in ("iPod_Control", "IPOD_CONTROL"):
         p = os.path.join(mountpoint, name, "Device")

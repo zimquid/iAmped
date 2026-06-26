@@ -145,6 +145,31 @@ class MTPBackend:
         self._records[key] = record
         return record
 
+    def add_video(self, track: dict, src_path: str, ext: str,
+                  mediatype: int = 0, video: dict | None = None,
+                  art_path: str | None = None) -> dict:
+        """Send a movie/episode to the device. libmtp has no metadata-rich video
+        send like ``mtp-sendtr`` does for audio, so we use ``mtp-sendfile`` and
+        let libmtp detect the video object type from the extension. Best-effort:
+        whether the player indexes it into its Videos menu depends on the model
+        and firmware. Tracked host-side for additive dedup like audio."""
+        key = str(track["rating_key"])
+        remote = os.path.basename(src_path)
+        result = _run(["mtp-sendfile", "-f", "Video", src_path, remote])
+        if result.returncode != 0:
+            raise MTPError(
+                (result.stderr or result.stdout or "mtp-sendfile failed").strip())
+        record = {
+            "rating_key": key,
+            "title": track.get("title"),
+            "media": "video",
+            "size": (os.path.getsize(src_path)
+                     if os.path.exists(src_path) else 0),
+            "source_signature": track.get("_sync_signature"),
+        }
+        self._records[key] = record
+        return record
+
     def finalize(self) -> None:
         self._state["tracks"] = self._records
         write_state(self.busloc, self._state)

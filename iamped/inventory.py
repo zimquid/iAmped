@@ -24,6 +24,7 @@ from .devices import applesync
 from .sync import device_state, itunesdb
 
 _AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".aif", ".aiff", ".wav", ".alac", ".m4b"}
+_VIDEO_EXTS = {".m4v", ".mp4", ".mov", ".avi", ".mkv"}
 
 ORIGIN_IAMPED = "iamped"
 ORIGIN_FOREIGN = "foreign"
@@ -78,6 +79,23 @@ def read_ipod_library(device_path: str) -> dict:
         total_plays += r.get("play_count") or 0
         rel = itunesdb.location_to_relpath(r["location"]) if r.get("location") else None
         path = os.path.join(device_path, rel) if rel else None
+        # The manifest is authoritative for video typing: it recovers entries
+        # written before the mediatype-offset fix (their DB mediatype reads 0,
+        # but the manifest recorded media:"video").
+        loc = (r.get("location") or "").lstrip(":")
+        hit = idx["by_location"].get(loc)
+        if hit is None and r.get("track_id") is not None:
+            hit = idx["by_track_id"].get(r["track_id"])
+        mediatype = r.get("mediatype") or 0
+        is_video = mediatype in itunesdb._VIDEO_TYPES
+        if hit and (hit.get("media") == "video" or
+                    hit.get("mediatype") in itunesdb._VIDEO_TYPES):
+            is_video = True
+            mediatype = (hit.get("mediatype") or mediatype
+                         or itunesdb.MEDIATYPE_MOVIE)
+        show = r.get("tv_show") or (hit or {}).get("show") or None
+        season = r.get("season_number") or (hit or {}).get("season_number") or 0
+        episode = r.get("episode_number") or (hit or {}).get("episode_number") or 0
         tracks.append({
             "track_id": r["track_id"],
             "title": r.get("title"), "artist": r.get("artist"),
@@ -92,6 +110,13 @@ def read_ipod_library(device_path: str) -> dict:
             "exists": bool(path and os.path.exists(path)),
             "origin": origin,
             "rating_key": rating_key,
+            # video typing so the UI can split Music vs Videos and group TV
+            "media": "video" if is_video else "audio",
+            "mediatype": mediatype,
+            "show": show,
+            "subtitle": r.get("subtitle") or None,
+            "season_number": season,
+            "episode_number": episode,
         })
 
     manifest = idx["manifest"] or {}
@@ -127,7 +152,9 @@ def _scan_massstorage(device_path: str) -> dict:
         if os.path.basename(root).startswith("."):
             continue
         for fn in files:
-            if os.path.splitext(fn)[1].lower() not in _AUDIO_EXTS:
+            ext = os.path.splitext(fn)[1].lower()
+            is_video = ext in _VIDEO_EXTS
+            if ext not in _AUDIO_EXTS and not is_video:
                 continue
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, device_path)
@@ -138,9 +165,17 @@ def _scan_massstorage(device_path: str) -> dict:
             except OSError:
                 size = 0
             total_bytes += size
-            tracks.append({"title": os.path.splitext(fn)[0], "path": full,
-                           "location": rel, "size": size, "exists": True,
-                           "origin": origin})
+            track = {"title": os.path.splitext(fn)[0], "path": full,
+                     "location": rel, "size": size, "exists": True,
+                     "origin": origin, "media": "video" if is_video else "audio"}
+            if is_video:
+                # Recover show / season from the Video/<Show>/Season NN/ tree the
+                # mass-storage writer lays down, so the UI can group TV episodes.
+                parts = rel.split(os.sep)
+                if len(parts) >= 3 and parts[0].lower() == "video" \
+                        and parts[1].lower() != "movies":
+                    track["show"] = parts[1]
+            tracks.append(track)
     return {
         "device_type": "massstorage", "device_path": device_path,
         "track_count": len(tracks), "tracks": tracks, "by_origin": counts,

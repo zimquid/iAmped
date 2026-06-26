@@ -188,6 +188,47 @@ class MassStorageBackend:
         self._records[key] = record
         return record
 
+    def add_video(self, track: dict, src_path: str, ext: str,
+                  mediatype: int = 0, video: dict | None = None,
+                  art_path: str | None = None) -> dict:
+        """Copy a movie/episode into a ``Video/`` tree: TV under
+        ``Video/<Show>/Season N/``, movies under ``Video/Movies/``. Recorded with
+        a ``media:"video"`` marker so manifest dedup/cleanup keeps audio and video
+        independent."""
+        v = video or {}
+        title = sanitize(track.get("title", "Untitled"), "Untitled")
+        show = v.get("show")
+        if show:
+            season = int(v.get("season") or 0)
+            rel_dir = os.path.join("Video", sanitize(show, "Show"),
+                                   f"Season {season:02d}")
+        else:
+            rel_dir = os.path.join("Video", "Movies")
+        fname = title + ext
+        dst = os.path.join(self.root, rel_dir, fname)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        base, e = os.path.splitext(dst)
+        n = 1
+        while os.path.exists(dst) and track["rating_key"] not in self._rel:
+            dst = f"{base} ({n}){e}"
+            n += 1
+        size = atomic_copy(src_path, dst)
+        key = str(track["rating_key"])
+        rel = os.path.relpath(dst, self.root)
+        record = {
+            "rating_key": key,
+            "path": rel,
+            "size": size,
+            "title": track.get("title"),
+            "media": "video",
+            "source_signature": track.get("_sync_signature"),
+            "new_file": True,
+        }
+        self._rel[key] = rel
+        self._meta[key] = track
+        self._records[key] = record
+        return record
+
     def add_playlist(self, name: str, rating_keys: list[str]) -> None:
         present = [rk for rk in rating_keys if rk in self._rel]
         if not present:
@@ -228,6 +269,19 @@ class MassStorageBackend:
                     os.remove(full)
                 except FileNotFoundError:
                     pass
+
+    def forget_locations(self, rels: set[str]) -> int:
+        """Drop manifest records whose file path is in *rels* (the caller has
+        already deleted the files). Leaves playlists and other tracks intact."""
+        manifest = read_manifest(self.root, "massstorage") or {}
+        want = {r.replace(":", os.sep) for r in rels}
+        kept = [rec for rec in manifest.get("tracks", [])
+                if (rec.get("path") or "").replace(":", os.sep) not in want]
+        dropped = len(manifest.get("tracks", [])) - len(kept)
+        if dropped:
+            manifest["tracks"] = kept
+            write_manifest(self.root, "massstorage", manifest)
+        return dropped
 
     def records(self) -> list[dict]:
         return list(self._records.values())
