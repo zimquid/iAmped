@@ -15,9 +15,10 @@ from __future__ import annotations
 import re
 
 from .model import Device, host_writability
-from . import volumes, rawdisk, fsdetect
+from . import volumes, rawdisk, fsdetect, mtpdetect, capabilities
 
-__all__ = ["Device", "host_writability", "list_devices", "fsdetect"]
+__all__ = ["Device", "host_writability", "list_devices", "fsdetect",
+           "capabilities", "mtpdetect"]
 
 # Strip a partition suffix to get the parent whole-disk node, so a mounted
 # volume (/dev/disk4s2, /dev/sdb2) can be matched to a raw disk (/dev/disk4,
@@ -41,15 +42,19 @@ def _whole_disk(dev_path: str | None) -> str | None:
     return dev_path
 
 
-def list_devices(include_raw: bool = True) -> list[Device]:
+def list_devices(include_raw: bool = True,
+                 include_mtp: bool = False) -> list[Device]:
     """All sync targets for this host, de-duplicated.
 
     ``include_raw`` scans physical disks for unmountable iPods; set False to
     skip it (e.g. to avoid the admin prompt) and only list mounted volumes.
+    ``include_mtp`` additionally probes for MTP players via libmtp — opt-in,
+    because the probe is slow and momentarily seizes the device, so it must
+    stay off the hot polling path.
     """
     mounted = volumes.mounted_devices()
     if not include_raw:
-        return mounted
+        return _tag_transport(mounted, include_mtp)
 
     mounted_disks = {_whole_disk(d.raw_path) for d in mounted if d.raw_path}
     mounted_has_ipod = any(d.is_ipod for d in mounted)
@@ -67,4 +72,14 @@ def list_devices(include_raw: bool = True) -> list[Device]:
                 continue
         extra.append(raw)
 
-    return mounted + extra
+    return _tag_transport(mounted + extra, include_mtp)
+
+
+def _tag_transport(devices: list[Device], include_mtp: bool) -> list[Device]:
+    """Stamp each device's auto-detected transport, and append MTP players."""
+    for dev in devices:
+        if not dev.transport:
+            dev.transport = capabilities.classify(dev).transport
+    if include_mtp:
+        devices = devices + mtpdetect.list_mtp()
+    return devices

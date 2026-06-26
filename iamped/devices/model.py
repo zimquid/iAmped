@@ -84,6 +84,10 @@ class Device:
     ipod_model: str = ""               # friendly model, e.g. "iPod nano (1st generation)"
     ipod_generation: str = ""          # coarse generation label, e.g. "iPod nano (1st generation)"
 
+    model: str = ""                    # USB product / media name, e.g. "MuVo TX FM"
+    transport: str = ""                # "ums" | "mtp" | "ipod" (filled by classify)
+    mtp_busloc: str = ""               # libmtp bus/dev address for MTP devices
+
     # Derived capability for the running host; filled by capability().
     writable: bool = False
     note: str = ""

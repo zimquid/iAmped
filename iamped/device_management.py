@@ -70,6 +70,7 @@ def save_profile(path: str, dtype: str, values: dict) -> dict:
         "name", "device_type", "reserve_mb", "fill_strategy",
         "transcode_lossless", "target_bitrate_k",
         "sync_artwork", "mirror", "playlist_ids",
+        "transport", "layout",   # override the auto-detected sync mode
     }
     current = all_profiles.get(did, {})
     current.update({k: v for k, v in values.items() if k in allowed})
@@ -204,11 +205,17 @@ def restore_backup(path: str, dtype: str, backup_id: str) -> dict:
 def eject(path: str) -> None:
     system = platform.system()
     if system == "Darwin":
-        command = ["diskutil", "eject", path]
+        # `diskutil eject` powers down the whole disk and refuses if any volume
+        # is "busy" — which on these players constantly happens because
+        # Spotlight (mds) and fseventsd keep transient handles open. Fall back
+        # to a forced unmount, which is what actually frees the device for
+        # safe removal.
+        commands = [["diskutil", "eject", path],
+                    ["diskutil", "unmount", "force", path]]
     elif system == "Windows":
-        command = ["powershell", "-NoProfile", "-Command",
-                   f"(New-Object -comObject Shell.Application).Namespace(17)."
-                   f"ParseName('{path}').InvokeVerb('Eject')"]
+        commands = [["powershell", "-NoProfile", "-Command",
+                     f"(New-Object -comObject Shell.Application).Namespace(17)."
+                     f"ParseName('{path}').InvokeVerb('Eject')"]]
     else:
         mounted = subprocess.run(
             ["findmnt", "-no", "SOURCE", "--target", path],
@@ -216,7 +223,12 @@ def eject(path: str) -> None:
         source = mounted.stdout.strip()
         if not source:
             raise RuntimeError("Could not resolve the device block path.")
-        command = ["udisksctl", "unmount", "-b", source]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "Eject failed").strip())
+        commands = [["udisksctl", "unmount", "-b", source]]
+    last = None
+    for command in commands:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return
+        last = (result.stderr or result.stdout or "Eject failed").strip()
+    raise RuntimeError(last or "Eject failed")

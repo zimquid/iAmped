@@ -7,6 +7,7 @@ every player understands.
 from __future__ import annotations
 
 import os
+import shutil
 
 from .. import artwork
 from .base import free_bytes, sanitize
@@ -14,12 +15,33 @@ from .device_state import (atomic_copy, atomic_write_text, managed_records,
                            read_manifest, record_is_valid, write_manifest)
 
 
+def _prune_empty(directory: str, stop_at: str) -> None:
+    """Walk up from *directory*, removing each dir until it's non-empty or
+    we reach *stop_at* (the device root — never removed)."""
+    stop = os.path.realpath(stop_at)
+    while True:
+        real = os.path.realpath(directory)
+        if real == stop or not real.startswith(stop + os.sep):
+            break
+        try:
+            os.rmdir(directory)
+            directory = os.path.dirname(directory)
+        except OSError:
+            break
+
+
 class MassStorageBackend:
     label = "USB mass-storage player"
 
-    def __init__(self, device_path: str):
+    def __init__(self, device_path: str, layout: str = "nested"):
+        # layout "nested": Music/<Artist>/<Album>/<Track>  (recursive players)
+        # layout "flat":   <Artist> - <Album>/<Track>      (root + one level —
+        #                  required by flat-scan players like the Creative MuVo,
+        #                  which ignore anything in a sub-folder of a folder).
         self.root = device_path
-        self.music_dir = os.path.join(device_path, "Music")
+        self.layout = layout
+        self.music_dir = (device_path if layout == "flat"
+                          else os.path.join(device_path, "Music"))
         self.playlist_dir = os.path.join(device_path, "Playlists")
         self._rel: dict[str, str] = {}     # rating_key -> path relative to root
         self._meta: dict[str, dict] = {}
@@ -31,6 +53,53 @@ class MassStorageBackend:
 
     def prepare(self) -> None:
         os.makedirs(self.music_dir, exist_ok=True)
+
+    def _migrate_record(self, record: dict) -> dict:
+        """Move a file from its stored path to match the current layout.
+
+        Called when resuming an existing sync after the user changes the device
+        profile from nested to flat (or vice versa).  Moves the file, prunes
+        now-empty directories, and returns an updated record.  No-ops if the
+        file is already in the right layout or cannot be moved cleanly.
+        """
+        old_rel = record.get("path", "").replace("\\", "/")
+        in_nested = old_rel.startswith("Music/")
+        in_flat = not in_nested and old_rel.count("/") == 1
+
+        if self.layout == "flat" and in_nested:
+            # Music/<Artist>/<Album>/<Track> → <Artist> - <Album>/<Track>
+            parts = old_rel.split("/")
+            if len(parts) == 4:
+                artist_dir, album_dir, fname = parts[1], parts[2], parts[3]
+                folder = sanitize(f"{artist_dir} - {album_dir}", "Music")
+                new_rel = os.path.join(folder, fname)
+                old_abs = os.path.join(self.root, old_rel)
+                new_abs = os.path.join(self.root, new_rel)
+                if os.path.exists(old_abs) and not os.path.exists(new_abs):
+                    os.makedirs(os.path.dirname(new_abs), exist_ok=True)
+                    shutil.move(old_abs, new_abs)
+                    _prune_empty(os.path.dirname(old_abs), self.root)
+                    return {**record, "path": new_rel}
+
+        elif self.layout == "nested" and in_flat:
+            # <Artist> - <Album>/<Track> → Music/<Artist>/<Album>/<Track>
+            # Use stored artist/album when available so the folder names are
+            # consistent with what add_track would produce.
+            artist = sanitize(record.get("artist", ""), "Unknown Artist")
+            album = sanitize(record.get("album", ""), "Unknown Album")
+            parts = old_rel.split("/")
+            if len(parts) == 2 and artist and album:
+                fname = parts[1]
+                new_rel = os.path.join("Music", artist, album, fname)
+                old_abs = os.path.join(self.root, old_rel)
+                new_abs = os.path.join(self.root, new_rel)
+                if os.path.exists(old_abs) and not os.path.exists(new_abs):
+                    os.makedirs(os.path.dirname(new_abs), exist_ok=True)
+                    shutil.move(old_abs, new_abs)
+                    _prune_empty(os.path.dirname(old_abs), self.root)
+                    return {**record, "path": new_rel}
+
+        return record
 
     def import_existing(self, keep_tracks: dict[str, dict] | None = None,
                         resume_records: dict[str, dict] | None = None) -> int:
@@ -47,6 +116,7 @@ class MassStorageBackend:
                     "rating_key": key,
                     "title": record.get("title"),
                     "artist": record.get("artist"),
+                    "album": record.get("album"),
                     "duration_ms": record.get("duration_ms") or 0,
                 }
                 for key, record in prior.items()
@@ -56,6 +126,7 @@ class MassStorageBackend:
             record = prior.get(str(key))
             if not record or not record_is_valid(self.root, record):
                 continue
+            record = self._migrate_record(record)
             self.restore_track(track, record)
             carried += 1
         return carried
@@ -78,7 +149,14 @@ class MassStorageBackend:
         tn = track.get("track_number")
         prefix = f"{int(tn):02d} - " if tn else ""
         fname = sanitize(f"{prefix}{track.get('title', 'Untitled')}", "Untitled") + ext
-        rel = os.path.join("Music", artist, album, fname)
+        if self.layout == "flat":
+            # One folder deep: "<Artist> - <Album>/<Track>". Flat-scan players
+            # (e.g. the Creative MuVo) only recognise the root and a single
+            # folder level, so artist/album collapse into one folder name.
+            folder = sanitize(f"{artist} - {album}", "Music")
+            rel = os.path.join(folder, fname)
+        else:
+            rel = os.path.join("Music", artist, album, fname)
         dst = os.path.join(self.root, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         # avoid clobbering distinct tracks that sanitize to the same name
@@ -100,6 +178,7 @@ class MassStorageBackend:
             "size": size,
             "title": track.get("title"),
             "artist": track.get("artist"),
+            "album": track.get("album"),
             "duration_ms": track.get("duration_ms") or 0,
             "source_signature": track.get("_sync_signature"),
             "new_file": True,
