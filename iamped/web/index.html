@@ -58,6 +58,9 @@
       <div class="src-item" id="src-music">
         <svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>
         Music</div>
+      <div class="src-item" id="src-video" data-pane="pane-video">
+        <svg viewBox="0 0 16 16"><rect x="1" y="3" width="14" height="10" rx="1" fill="none" stroke="#5f6b7e"/><path d="M6 6l4 2-4 2z"/></svg>
+        Video</div>
 
       <div class="src-section">View</div>
       <div class="src-item" id="src-visualizer" data-pane="pane-visualizer">
@@ -181,6 +184,34 @@
             <div class="c-time">Time</div>
           </div>
           <div class="songbody" id="browse-body"></div>
+        </div>
+      </div>
+
+      <!-- VIDEO (Plex movies / TV → device) -->
+      <div class="pane" id="pane-video">
+        <h2>Video</h2>
+        <p class="lead">Sync movies and TV shows from your Plex video libraries to a video iPod (5G/5.5G, classic, nano 3G–5G), a Creative Zen / MTP player, or a generic USB player. iAmped transcodes each title to a format the device can play.</p>
+        <div class="video-progress hidden" id="video-progress">
+          <div class="vp-bar"><div class="vp-fill" id="vp-fill"></div></div>
+          <div class="vp-meta">
+            <span class="vp-label" id="vp-label">Preparing…</span>
+            <span class="vp-pct" id="vp-pct"></span>
+          </div>
+        </div>
+        <div class="video-controls">
+          <div class="field">
+            <label>Plex video library</label>
+            <select id="video-section"></select>
+          </div>
+          <div class="video-target" id="video-target">No device selected — pick one under Devices.</div>
+        </div>
+        <div class="video-list" id="video-list">
+          <div class="muted">Choose a video library to begin.</div>
+        </div>
+        <div class="video-foot">
+          <span class="video-count" id="video-count">0 selected</span>
+          <button class="aqua" id="btn-video-sync" disabled>Sync video to device</button>
+          <div class="status" id="video-status"></div>
         </div>
       </div>
 

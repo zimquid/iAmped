@@ -111,6 +111,29 @@ def classify(device) -> Capability:
         "Unknown USB player — flat layout for maximum compatibility")
 
 
+def video_profile(device, capability: "Capability"):
+    """Pick the :class:`~iamped.sync.video.VideoProfile` for *device*, or
+    ``None`` when it can't play video iAmped can sync.
+
+    - iPod → the iPod video profile, but only for video-capable generations
+      (5G/5.5G video, classic, nano 3G–5G); ``None`` for older/touch models.
+    - MTP player → the MTP/Zen profile (best-effort).
+    - mass-storage player → the generic 720p profile.
+    """
+    from ..sync import video  # local import avoids an import cycle
+
+    if capability.transport == TRANSPORT_IPOD:
+        from . import ipodmodel
+        label = getattr(device, "ipod_generation", "") or \
+            getattr(device, "ipod_model", "") or getattr(device, "model", "")
+        return video.IPOD_VIDEO if ipodmodel.is_video_capable(label) else None
+    if capability.transport == TRANSPORT_MTP:
+        return video.MTP_VIDEO
+    if capability.transport == TRANSPORT_UMS:
+        return video.GENERIC_VIDEO
+    return None
+
+
 def resolve(device, profile: dict | None = None) -> Capability:
     """Auto-classify *device*, then apply any ``transport``/``layout`` override
     from a saved device profile."""

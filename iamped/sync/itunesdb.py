@@ -49,7 +49,31 @@ MHOD_ALBUM = 3
 MHOD_ARTIST = 4
 MHOD_GENRE = 5
 MHOD_FILETYPE = 6
+MHOD_DESCRIPTION = 14   # long description / summary (podcast + video)
+MHOD_SUBTITLE = 18      # episode subtitle / title
+MHOD_TVSHOW = 19        # TV show name (groups episodes in the Videos menu)
+MHOD_TVEPISODE = 20     # episode id string, e.g. "S01E03"
+MHOD_TVNETWORK = 21     # TV network
 MHOD_PLAYLIST_POS = 100
+
+# mhit "mediatype" field: how the iPod files a track into its Music / Videos /
+# Music Videos / TV Shows menus. Offsets and values per libgpod itdb_itunesdb.c
+# (mediatype at mhit+0xD0, season_nr at +0xD4, episode_nr at +0xD8):
+#
+#   put32lint(cts, track->mediatype);   /* +0xD0 */
+#   put32lint(cts, track->season_nr);   /* +0xD4 */
+#   put32lint(cts, track->episode_nr);  /* +0xD8 */
+#
+# Audio MUST be flagged ITDB_MEDIATYPE_AUDIO (1): a 0 here means "unknown", and
+# the 5G/5.5G/classic firmware then files the track into *every* menu — which is
+# why audio tracks were leaking into the Videos and Music Videos lists.
+MEDIATYPE_AUDIO = 0x01
+MEDIATYPE_MOVIE = 0x02
+MEDIATYPE_MUSICVIDEO = 0x20
+MEDIATYPE_TVSHOW = 0x40
+# Entries whose mediatype the iPod files under the Videos menus (and for which we
+# emit the video string mhods / season / episode fields).
+_VIDEO_TYPES = frozenset({MEDIATYPE_MOVIE, MEDIATYPE_MUSICVIDEO, MEDIATYPE_TVSHOW})
 
 
 def _mac_time(epoch_secs: int | float | None) -> int:
@@ -88,6 +112,9 @@ def _filetype_label(ext: str) -> str:
         "aif": "AIFF audio file",
         "aiff": "AIFF audio file",
         "wav": "WAV audio file",
+        "m4v": "MPEG-4 video file",
+        "mp4": "MPEG-4 video file",
+        "mov": "QuickTime movie file",
     }.get(e, "Audio file")
 
 
@@ -100,10 +127,10 @@ class _Entry:
     Only ``new``/``iamped`` entries are claimed in the manifest.
     """
     __slots__ = ("track_id", "location", "ext", "size", "track", "mac_added",
-                 "origin", "art_path")
+                 "origin", "art_path", "mediatype", "video")
 
     def __init__(self, track_id, location, ext, size, track, mac_added,
-                 origin="new", art_path=None):
+                 origin="new", art_path=None, mediatype=0, video=None):
         self.track_id = track_id
         self.location = location
         self.ext = ext
@@ -112,6 +139,8 @@ class _Entry:
         self.mac_added = mac_added
         self.origin = origin
         self.art_path = art_path
+        self.mediatype = mediatype          # 0 = audio; MEDIATYPE_* for video
+        self.video = video or {}            # show/season/episode/network/summary
 
 
 def _u32(b: bytes, off: int) -> int:
@@ -157,6 +186,9 @@ _MHOD_DATA_OFF = 0x28
 _MHOD_STRINGS = {
     MHOD_TITLE: "title", MHOD_LOCATION: "location", MHOD_ALBUM: "album",
     MHOD_ARTIST: "artist", MHOD_GENRE: "genre", MHOD_FILETYPE: "filetype",
+    MHOD_DESCRIPTION: "description", MHOD_SUBTITLE: "subtitle",
+    MHOD_TVSHOW: "tv_show", MHOD_TVEPISODE: "tv_episode_id",
+    MHOD_TVNETWORK: "tv_network",
 }
 
 
@@ -204,6 +236,14 @@ def read_tracks_full(db: bytes) -> list[dict]:
             "artist": meta.get("artist"),
             "album": meta.get("album"),
             "genre": meta.get("genre"),
+            "mediatype": _u32(db, p + 0xD0) if header_len >= 0xD4 else 0,
+            "season_number": _u32(db, p + 0xD4) if header_len >= 0xD8 else 0,
+            "episode_number": _u32(db, p + 0xD8) if header_len >= 0xDC else 0,
+            "tv_show": meta.get("tv_show"),
+            "tv_episode_id": meta.get("tv_episode_id"),
+            "tv_network": meta.get("tv_network"),
+            "description": meta.get("description"),
+            "subtitle": meta.get("subtitle"),
             "location": meta.get("location"),     # e.g. ":iPod_Control:Music:F26:WJUW.m4a"
             "size": _u32(db, p + 0x24),
             "duration_ms": _u32(db, p + 0x28),
@@ -459,9 +499,32 @@ class ITunesDBBackend:
                     "rating_key": desired.get("rating_key"),
                     "_sync_signature": desired.get("_sync_signature"),
                 })
+            # Trust the manifest's video typing over the DB read: it survives an
+            # older/broken on-device layout and lets a re-sync rewrite the entry
+            # with correct offsets instead of silently demoting it to audio.
+            mediatype = (prior_hit or {}).get("mediatype") \
+                or (r.get("mediatype") if r.get("mediatype") in _VIDEO_TYPES else 0)
+            # Old manifests recorded media:"video" without a numeric type; recover
+            # those as a movie so the entry self-heals to the right offsets on the
+            # next finalize instead of being demoted to audio.
+            if not mediatype and (prior_hit or {}).get("media") == "video":
+                mediatype = MEDIATYPE_MOVIE
+            if mediatype in _VIDEO_TYPES:
+                video = {
+                    "show": r.get("tv_show"), "subtitle": r.get("subtitle"),
+                    "episode_id": r.get("tv_episode_id"),
+                    "network": r.get("tv_network"), "summary": r.get("description"),
+                    "season": (prior_hit or {}).get("season_number")
+                              or r.get("season_number") or 0,
+                    "episode": (prior_hit or {}).get("episode_number")
+                               or r.get("episode_number") or 0,
+                }
+            else:
+                video = {}
             e = _Entry(r["track_id"], loc, os.path.splitext(full)[1].lower(),
                        os.path.getsize(full), track, _mac_time(time.time()),
-                       origin="iamped" if prior_hit else "existing")
+                       origin="iamped" if prior_hit else "existing",
+                       mediatype=mediatype, video=video)
             self._entries.append(e)
             if track["rating_key"]:
                 self._by_key[track["rating_key"]] = e
@@ -510,6 +573,46 @@ class ITunesDBBackend:
             "mac_added": entry.mac_added,
             "title": track.get("title"),
             "artist": track.get("artist"),
+            "source_signature": track.get("_sync_signature"),
+            "new_file": True,
+        }
+
+    def add_video(self, track: dict, src_path: str, ext: str,
+                  mediatype: int, video: dict | None = None,
+                  art_path: str | None = None) -> dict:
+        """Stage a movie or TV episode. Same file placement and monotonic-id
+        naming as :meth:`add_track`, but the entry is flagged as video so
+        :meth:`_build_mhit` writes the mediatype + TV show/season/episode fields
+        and the iPod files it under Movies / TV Shows.
+
+        EXPERIMENTAL: the iTunesDB *video* record layout cannot be validated
+        against hardware here. Structure is round-trip tested; treat first use on
+        a physical iPod as experimental (a backup iTunesDB is written on every
+        finalize)."""
+        fid = self._next_id
+        folder = fid % NUM_MUSIC_FOLDERS
+        name = f"{fid:05d}{ext.lower()}"
+        rel = os.path.join("Music", f"F{folder:02d}", name)
+        dst = os.path.join(self.ctrl, rel)
+        size = atomic_copy(src_path, dst)
+        location = ":iPod_Control:" + rel.replace(os.sep, ":")
+        entry = _Entry(fid, location, ext.lower(), size, track,
+                       _mac_time(time.time()), origin="new", art_path=art_path,
+                       mediatype=mediatype, video=video or {})
+        self._next_id += 1
+        self._entries.append(entry)
+        self._by_key[str(track["rating_key"])] = entry
+        return {
+            "rating_key": str(track["rating_key"]),
+            "track_id": fid,
+            "path": os.path.relpath(dst, self.root),
+            "location": location,
+            "ext": ext.lower(),
+            "size": size,
+            "mac_added": entry.mac_added,
+            "title": track.get("title"),
+            "media": "video",
+            "mediatype": mediatype,
             "source_signature": track.get("_sync_signature"),
             "new_file": True,
         }
@@ -568,6 +671,20 @@ class ITunesDBBackend:
         ]
         if t.get("genre"):
             mhods.append(_string_mhod(MHOD_GENRE, t["genre"]))
+        is_video = e.mediatype in _VIDEO_TYPES
+        if is_video:
+            v = e.video
+            if v.get("summary"):
+                mhods.append(_string_mhod(MHOD_DESCRIPTION, v["summary"]))
+            if e.mediatype == MEDIATYPE_TVSHOW:
+                if v.get("show"):
+                    mhods.append(_string_mhod(MHOD_TVSHOW, v["show"]))
+                if v.get("subtitle"):
+                    mhods.append(_string_mhod(MHOD_SUBTITLE, v["subtitle"]))
+                if v.get("episode_id"):
+                    mhods.append(_string_mhod(MHOD_TVEPISODE, v["episode_id"]))
+                if v.get("network"):
+                    mhods.append(_string_mhod(MHOD_TVNETWORK, v["network"]))
         mhods.append(_string_mhod(MHOD_FILETYPE, _filetype_label(e.ext)))
         body = b"".join(mhods)
 
@@ -621,6 +738,18 @@ class ITunesDBBackend:
             struct.pack_into("<I", b, 0x80, int(t.get("_artwork_size") or 0))
             if HDR >= 0x164:
                 struct.pack_into("<I", b, 0x160, artwork_id)
+        # mediatype (0xD0) is what files the entry into the Music vs Videos
+        # menus. Every track gets one: audio → ITDB_MEDIATYPE_AUDIO (1) so it
+        # stays out of the Videos lists; video → its movie/TV/music-video type.
+        # For TV, season_nr (0xD4) and episode_nr (0xD8) drive show→season
+        # grouping. Offsets per libgpod; both fit the 0xF4 and 0x248 headers we
+        # emit (the iPod only reads them when header_len >= 0xF4).
+        struct.pack_into("<I", b, 0xD0, e.mediatype or MEDIATYPE_AUDIO)
+        if is_video:
+            b[0xB1] = 1                       # movie_flag — 5G wants it for video
+            if e.mediatype == MEDIATYPE_TVSHOW:
+                struct.pack_into("<I", b, 0xD4, int(e.video.get("season") or 0))
+                struct.pack_into("<I", b, 0xD8, int(e.video.get("episode") or 0))
         return bytes(b) + body
 
     def _build_track_dataset(self) -> bytes:
@@ -775,6 +904,14 @@ class ITunesDBBackend:
                 "ext": e.ext,
                 "mac_added": e.mac_added,
                 "title": t.get("title"), "artist": t.get("artist"),
+                "media": "video" if e.mediatype in _VIDEO_TYPES else "audio",
+                # Persist the video typing so a re-sync recovers it even if the
+                # on-device record was written by an older (or differently laid
+                # out) iAmped — the DB read alone can't be trusted across format
+                # fixes. Harmless for audio (mediatype 0/absent).
+                "mediatype": e.mediatype if e.mediatype in _VIDEO_TYPES else 0,
+                "season_number": int((e.video or {}).get("season") or 0),
+                "episode_number": int((e.video or {}).get("episode") or 0),
                 "source_signature": t.get("_sync_signature"),
             })
         write_manifest(self.root, "ipod", {
@@ -845,6 +982,15 @@ class ITunesDBBackend:
             rel = e.location.lstrip(":").replace(":", os.sep)
             assert os.path.exists(os.path.join(self.root, rel)), \
                 f"missing audio file for track {e.track_id}: {rel}"
+        # mediatype must round-trip: video entries keep their movie/TV type, and
+        # audio entries must read back as ITDB_MEDIATYPE_AUDIO (never 0, or the
+        # iPod leaks them into the Videos menus).
+        rows = {r["track_id"]: r for r in read_tracks_full(db)}
+        for e in self._entries:
+            r = rows.get(e.track_id)
+            want = e.mediatype if e.mediatype in _VIDEO_TYPES else MEDIATYPE_AUDIO
+            assert r and r["mediatype"] == want, \
+                f"track {e.track_id} mediatype {r and r['mediatype']} != {want}"
         if self._hash58:
             assert _u32(db, 4) >= 0xF4, "hash58 database has a short mhbd"
             assert struct.unpack_from("<H", db, 0x30)[0] == 1, \
@@ -853,4 +999,6 @@ class ITunesDBBackend:
                 "generated iTunesDB has an invalid hash58"
         return {"tracks": track_count, "bytes": len(db),
                 "playlists": len(self._playlists) + 1,
+                "videos": sum(1 for e in self._entries
+                              if e.mediatype in _VIDEO_TYPES),
                 "hash58": self._hash58}

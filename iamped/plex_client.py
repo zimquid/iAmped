@@ -43,6 +43,34 @@ class TrackMeta:
     album_thumb: str = ""
 
 
+@dataclass
+class VideoMeta:
+    """A movie or TV episode pulled from a Plex video library. Mirrors
+    :class:`TrackMeta`, but carries the video/TV fields the device backends need
+    to build the on-device Movies / TV Shows menus."""
+    rating_key: str
+    kind: str                         # "movie" | "episode"
+    title: str
+    summary: str
+    year: Optional[int]
+    duration_ms: int
+    container: str                    # mp4 / mkv / avi ...
+    video_codec: str                  # h264 / hevc / mpeg4 ...
+    audio_codec: str
+    width: Optional[int]
+    height: Optional[int]
+    bitrate: Optional[int]            # kbps, whole-file
+    file_size: int
+    part_key: str                     # /library/parts/.../file.ext  (for download)
+    server_file: str                  # path on the Plex server (informational)
+    thumb: str = ""                   # poster / episode thumb image key
+    # Episode-only grouping fields (empty/0 for movies):
+    show_title: str = ""
+    show_key: str = ""
+    season_number: int = 0
+    episode_number: int = 0
+
+
 def connect(baseurl: str, token: str, timeout: int = 30) -> PlexServer:
     return PlexServer(baseurl.rstrip("/"), token, timeout=timeout)
 
@@ -144,6 +172,123 @@ def iter_tracks(server: PlexServer, section_title: str,
         done += 1
         if progress and (done % 50 == 0 or done == total):
             progress(done, total)
+        if meta:
+            yield meta
+
+
+def video_sections(server: PlexServer) -> list[dict]:
+    """Movie and TV-show libraries on the server (the video counterpart to
+    :func:`music_sections`)."""
+    return [{"title": s.title, "type": s.type}
+            for s in server.library.sections()
+            if s.type in ("movie", "show")]
+
+
+def _video_media_part(video):
+    """Return (media, part) for the first playable media of a movie/episode, or
+    (None, None) when it has no downloadable part."""
+    media = getattr(video, "media", None) or []
+    if not media or not media[0].parts:
+        return None, None
+    return media[0], media[0].parts[0]
+
+
+def movie_to_meta(video) -> Optional[VideoMeta]:
+    """Convert a plexapi Movie into our flat VideoMeta. None if unplayable."""
+    m, part = _video_media_part(video)
+    if part is None:
+        return None
+    return VideoMeta(
+        rating_key=str(video.ratingKey),
+        kind="movie",
+        title=_first(video, "title", default="Untitled"),
+        summary=_first(video, "summary", default="") or "",
+        year=_first(video, "year"),
+        duration_ms=int(getattr(video, "duration", 0) or 0),
+        container=(getattr(part, "container", None) or getattr(m, "container", "") or "").lower(),
+        video_codec=(getattr(m, "videoCodec", "") or "").lower(),
+        audio_codec=(getattr(m, "audioCodec", "") or "").lower(),
+        width=getattr(m, "width", None),
+        height=getattr(m, "height", None),
+        bitrate=getattr(m, "bitrate", None),
+        file_size=int(getattr(part, "size", 0) or 0),
+        part_key=part.key,
+        server_file=getattr(part, "file", "") or "",
+        thumb=getattr(video, "thumb", "") or "",
+    )
+
+
+def episode_to_meta(ep) -> Optional[VideoMeta]:
+    """Convert a plexapi Episode into VideoMeta with show/season/episode
+    grouping. None if unplayable."""
+    m, part = _video_media_part(ep)
+    if part is None:
+        return None
+    return VideoMeta(
+        rating_key=str(ep.ratingKey),
+        kind="episode",
+        title=_first(ep, "title", default="Untitled"),
+        summary=_first(ep, "summary", default="") or "",
+        year=_first(ep, "year"),
+        duration_ms=int(getattr(ep, "duration", 0) or 0),
+        container=(getattr(part, "container", None) or getattr(m, "container", "") or "").lower(),
+        video_codec=(getattr(m, "videoCodec", "") or "").lower(),
+        audio_codec=(getattr(m, "audioCodec", "") or "").lower(),
+        width=getattr(m, "width", None),
+        height=getattr(m, "height", None),
+        bitrate=getattr(m, "bitrate", None),
+        file_size=int(getattr(part, "size", 0) or 0),
+        part_key=part.key,
+        server_file=getattr(part, "file", "") or "",
+        thumb=getattr(ep, "thumb", "") or "",
+        show_title=_first(ep, "grandparentTitle", default="") or "",
+        show_key=str(getattr(ep, "grandparentRatingKey", "") or ""),
+        season_number=int(getattr(ep, "parentIndex", 0) or 0),
+        episode_number=int(getattr(ep, "index", 0) or 0),
+    )
+
+
+def iter_movies(server: PlexServer, section_title: str,
+                progress=None) -> Iterator[VideoMeta]:
+    """Yield every movie in a movie section. `progress(done, total)` optional."""
+    section = server.library.section(section_title)
+    total = getattr(section, "totalSize", None)
+    done = 0
+    for video in section.all():
+        meta = movie_to_meta(video)
+        done += 1
+        if progress and (done % 25 == 0 or done == total):
+            progress(done, total)
+        if meta:
+            yield meta
+
+
+def list_shows(server: PlexServer, section_title: str) -> list[dict]:
+    """TV shows in a show section: {key, title, year, thumb, episode_count}."""
+    section = server.library.section(section_title)
+    out: list[dict] = []
+    for show in section.all():
+        out.append({
+            "key": str(show.ratingKey),
+            "title": _first(show, "title", default="Untitled"),
+            "year": _first(show, "year"),
+            "thumb": getattr(show, "thumb", "") or "",
+            "episode_count": int(getattr(show, "leafCount", 0) or 0),
+        })
+    return out
+
+
+def iter_episodes(server: PlexServer, show_key: str) -> Iterator[VideoMeta]:
+    """Yield every episode of a show (in season/episode order)."""
+    show = fetch_track(server, show_key)   # fetchItem is type-agnostic
+    if show is None:
+        return
+    try:
+        episodes = show.episodes()
+    except Exception:
+        episodes = []
+    for ep in episodes:
+        meta = episode_to_meta(ep)
         if meta:
             yield meta
 

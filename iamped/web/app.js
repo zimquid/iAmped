@@ -124,6 +124,14 @@ function setSyncProgress(label, done, total) {
   $("sp-fill").style.width = total ? `${Math.min(100, (done / total) * 100)}%` : "0%";
 }
 
+// Top-of-pane progress bar for video sync — fills smoothly as each title encodes.
+function showVideoProgress(on) { $("video-progress").classList.toggle("hidden", !on); }
+function setVideoProgress(label, frac) {
+  $("vp-label").textContent = label;
+  $("vp-pct").textContent = `${Math.round(Math.min(1, Math.max(0, frac || 0)) * 100)}%`;
+  $("vp-fill").style.width = `${Math.min(100, Math.max(0, (frac || 0) * 100))}%`;
+}
+
 // ---- panes --------------------------------------------------------------
 function selectPane(paneId, srcEl) {
   document.querySelectorAll(".content > .pane").forEach((p) => p.classList.toggle("active", p.id === paneId));
@@ -131,6 +139,7 @@ function selectPane(paneId, srcEl) {
   if (srcEl) srcEl.classList.add("selected");
   if (paneId === "pane-browse") bottomBrowse();
   else { $("bottom-info").classList.remove("hidden"); $("capacity").classList.add("hidden"); $("cap-legend").classList.add("hidden"); $("sync-actions").classList.add("hidden"); $("bottom-info").textContent = "—"; }
+  if (paneId === "pane-video") openVideo();
 }
 document.querySelectorAll(".src-item[data-pane]").forEach((el) => { el.onclick = () => selectPane(el.dataset.pane, el); });
 
@@ -267,6 +276,7 @@ async function buildLibrary() {
 
 // ---------------------------------------------------------------- sidebar
 const ejectSvg = '<svg viewBox="0 0 16 16"><path d="M8 3l5 6H3zM3 11h10v2H3z"/></svg>';
+const filmSvg = '<svg viewBox="0 0 16 16"><rect x="1.5" y="3" width="13" height="10" rx="1.5" fill="none" stroke="#5f6b7e"/><path d="M6.5 6l4 2-4 2z"/></svg>';
 const plSvg = '<svg viewBox="0 0 16 16"><path d="M1 3h10v1.6H1zM1 6h10v1.6H1zM1 9h6v1.6H1zM12 7l3 2-3 2z"/></svg>';
 const sonicSvg = '<svg viewBox="0 0 16 16"><path d="M1 8h2l1-4 2 8 2-10 2 12 2-6h2"/><path d="M1 8h2l1-4 2 8 2-10 2 12 2-6h2" fill="none" stroke="#5f6b7e" stroke-width="1.1"/></svg>';
 
@@ -520,11 +530,13 @@ async function loadDevices() {
   if (!vols.length) { list.innerHTML = '<div class="src-item disabled">No device detected</div>'; return; }
   const noteSvg = '<svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>';
   list.innerHTML = vols.map((v) => `
-    <div class="src-item device" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-free="${v.free}" data-total="${v.total}" data-name="${esc(v.name)}" data-ipod-model="${esc(v.ipod_model || "")}" data-generation="${esc(v.ipod_generation || "")}" data-device-model="${esc(v.model || "")}" data-transport="${esc(v.transport || "")}"${(v.ipod_model || v.model) ? ` title="${esc(v.ipod_model || v.model)}"` : ""}>
+    <div class="src-item device" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-free="${v.free}" data-total="${v.total}" data-name="${esc(v.name)}" data-ipod-model="${esc(v.ipod_model || "")}" data-generation="${esc(v.ipod_generation || "")}" data-device-model="${esc(v.model || "")}" data-busloc="${esc(v.mtp_busloc || "")}" data-transport="${esc(v.transport || "")}"${(v.ipod_model || v.model) ? ` title="${esc(v.ipod_model || v.model)}"` : ""}>
       ${deviceIcon(v)}
       ${esc(v.name)}<span class="eject">${ejectSvg}</span></div>
     <div class="src-subitem device-music" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-name="${esc(v.name)}">
-      ${noteSvg}Music on device</div>`).join("");
+      ${noteSvg}Music on device</div>
+    <div class="src-subitem device-videos" data-path="${esc(v.path)}" data-ipod="${v.is_ipod}" data-name="${esc(v.name)}">
+      ${filmSvg}Videos on device</div>`).join("");
   list.querySelectorAll(".device").forEach((el) => {
     el.onclick = (event) => {
       if (event.target.closest(".eject")) { ejectDevice(el); return; }
@@ -549,6 +561,7 @@ async function loadDevices() {
     };
   });
   list.querySelectorAll(".device-music").forEach((el) => { el.onclick = () => openDeviceMusic(el); });
+  list.querySelectorAll(".device-videos").forEach((el) => { el.onclick = () => openDeviceVideos(el); });
 }
 
 // Show what's already on a device — the iTunes "music under the device" view.
@@ -563,7 +576,7 @@ async function openDeviceMusic(el) {
   lcd("Reading device…", path);
   try {
     const inv = await api(`/api/device/inventory?device_path=${encodeURIComponent(path)}&device_type=${type}`);
-    STATE.tracks = (inv.tracks || []).map((t, i) => ({
+    STATE.tracks = (inv.tracks || []).filter((t) => t.media !== "video").map((t, i) => ({
       rating_key: t.rating_key || `dev:${i}`,
       title: t.title, artist: t.artist, album: t.album,
       duration_ms: t.duration_ms || 0, plays: t.play_count || 0,
@@ -575,6 +588,98 @@ async function openDeviceMusic(el) {
     $("browse-body").innerHTML = `<div class="src-item disabled" style="padding:14px">${esc(e.message)}</div>`;
     lcd("iAmped", e.message);
   }
+}
+
+// ---- Videos already on a device: list + remove -------------------------
+const DEVVID = { path: null, ipod: false, name: "", videos: [] };
+
+// pane-browse is music-shaped; in video mode we hide the song header + the
+// music-only action buttons and render a self-contained video manager.
+function _setBrowseVideoMode(on) {
+  const pane = $("pane-browse");
+  pane.classList.toggle("video-mode", on);
+  $("browse-head-row").style.display = on ? "none" : "";
+  const acts = pane.querySelector(".browse-actions");
+  if (acts) acts.style.display = on ? "none" : "";
+}
+
+async function openDeviceVideos(el) {
+  const path = el.dataset.path, ipod = el.dataset.ipod === "true";
+  DEVVID.path = path; DEVVID.ipod = ipod; DEVVID.name = el.dataset.name;
+  STATE.view = { type: "device-videos", title: el.dataset.name, path };
+  $("browse-title").textContent = `${el.dataset.name} — Videos`;
+  $("btn-del-pl").classList.add("hidden");
+  selectPane("pane-browse", el);
+  _setBrowseVideoMode(true);
+  $("browse-body").innerHTML = `<div class="muted" style="padding:14px">Reading device…</div>`;
+  lcd("Reading device…", path);
+  try {
+    const type = ipod ? "ipod" : "massstorage";
+    const r = await api(`/api/device/videos?device_path=${encodeURIComponent(path)}&device_type=${type}`);
+    DEVVID.videos = r.videos || [];
+    renderDeviceVideos();
+    lcd("iAmped", `${r.count} video(s) on ${el.dataset.name} · ${fmtBytes(r.total_bytes || 0)}`);
+  } catch (e) {
+    $("browse-body").innerHTML = `<div class="src-item disabled" style="padding:14px">${esc(e.message)}</div>`;
+    lcd("iAmped", e.message);
+  }
+}
+
+function _dvRow(v) {
+  const isEp = !!v.show;
+  const tag = isEp
+    ? `S${String(v.season_number || 0).padStart(2, "0")}E${String(v.episode_number || 0).padStart(2, "0")}`
+    : "Movie";
+  const title = isEp ? (v.subtitle || v.title) : v.title;
+  return `<div class="dv-row">
+    <span class="dv-tag">${esc(tag)}</span>
+    <span class="dv-title">${esc(title || "Untitled")}</span>
+    <span class="dv-size">${fmtBytes(v.size || 0)}</span>
+    <button class="dv-remove" data-id="${v.track_id != null ? v.track_id : ""}" data-loc="${esc(v.location || "")}" title="Remove from device">Remove</button>
+  </div>`;
+}
+
+function renderDeviceVideos() {
+  const vids = DEVVID.videos;
+  if (!vids.length) {
+    $("browse-body").innerHTML = `<div class="muted" style="padding:18px">No videos synced to this device yet. Use the <b>Video</b> tab to sync movies or TV shows.</div>`;
+    return;
+  }
+  const movies = vids.filter((v) => !v.show);
+  const shows = {};
+  vids.filter((v) => v.show).forEach((v) => { (shows[v.show] ||= []).push(v); });
+  let html = "";
+  if (movies.length) {
+    html += `<div class="dv-group"><div class="dv-group-head">Movies <span class="dv-count">${movies.length}</span></div>` +
+      movies.slice().sort((a, b) => (a.title || "").localeCompare(b.title || "")).map(_dvRow).join("") + `</div>`;
+  }
+  Object.keys(shows).sort().forEach((show) => {
+    const eps = shows[show].slice().sort((a, b) =>
+      (a.season_number - b.season_number) || (a.episode_number - b.episode_number));
+    html += `<div class="dv-group"><div class="dv-group-head">${esc(show)} <span class="dv-count">${eps.length}</span></div>` +
+      eps.map(_dvRow).join("") + `</div>`;
+  });
+  $("browse-body").innerHTML = html;
+  $("browse-body").querySelectorAll(".dv-remove").forEach((b) => { b.onclick = () => removeDeviceVideo(b); });
+}
+
+async function removeDeviceVideo(btn) {
+  if (!confirm("Remove this video from the device? The file is deleted from the device; your Plex library is untouched.")) return;
+  btn.disabled = true; btn.textContent = "Removing…";
+  const body = { device_path: DEVVID.path,
+    device_type: DEVVID.ipod ? "ipod" : "massstorage", device_name: DEVVID.name };
+  if (DEVVID.ipod) body.track_ids = [Number(btn.dataset.id)];
+  else body.locations = [btn.dataset.loc];
+  try {
+    const r = await api("/api/device/video/remove", "POST", body);
+    if (r.error) { alert(r.error); btn.disabled = false; btn.textContent = "Remove"; return; }
+    lcd("iAmped", `Removed — freed ${fmtBytes(r.freed_bytes || 0)}.` +
+      (DEVVID.ipod ? " Eject safely before unplugging." : ""));
+    const type = DEVVID.ipod ? "ipod" : "massstorage";
+    const rr = await api(`/api/device/videos?device_path=${encodeURIComponent(DEVVID.path)}&device_type=${type}`);
+    DEVVID.videos = rr.videos || []; renderDeviceVideos();
+    await loadSidebar();
+  } catch (e) { alert(e.message); btn.disabled = false; btn.textContent = "Remove"; }
 }
 
 // ---------------------------------------------------------------- browser
@@ -647,6 +752,7 @@ function bindRows(rows) {
   });
 }
 function renderTracks() {
+  _setBrowseVideoMode(false);            // restore music chrome if we left video mode
   const body = $("browse-body");
   body.innerHTML = STATE.tracks.map((t, i) => rowHtml(t, i)).join("");
   bindRows([...body.querySelectorAll(".songrow")]);
@@ -982,9 +1088,11 @@ async function selectDevice(el) {
     path, type: isIpod ? "ipod" : "massstorage", name: el.dataset.name,
     is_ipod: isIpod, ipod_model: el.dataset.ipodModel,
     ipod_generation: el.dataset.generation, model: el.dataset.deviceModel,
-    transport: el.dataset.transport,
+    transport: el.dataset.transport || "",
+    busloc: el.dataset.busloc || "", generation: el.dataset.generation || "",
   };
   $("dev-icon").innerHTML = deviceIcon(STATE.currentDevice, "inspector");
+  if (document.getElementById("pane-video")?.classList.contains("active")) updateVideoTarget();
   STATE.manualKeys = null; STATE.manualPlaylistIds = null;
   STATE.transferMaxTracks = null; STATE.review = [];
   $("review-list").innerHTML = "";
@@ -1421,6 +1529,188 @@ $("view-list").onclick = () => {
   openLibrary();
 };
 $("view-visualizer").onclick = () => toggleVisualizer();
+
+// ---------------------------------------------------------------- video sync
+const VIDEO = { loaded: false, sections: [], kind: "movie",
+                selected: new Map(), shows: {} };
+
+async function openVideo() {
+  updateVideoTarget();
+  if (VIDEO.loaded) return;
+  try {
+    const r = await api("/api/video/sections");
+    VIDEO.sections = r.sections || [];
+  } catch (e) {
+    $("video-list").innerHTML = `<div class="muted">${esc(e.message)}</div>`;
+    return;
+  }
+  VIDEO.loaded = true;
+  const sel = $("video-section");
+  if (!VIDEO.sections.length) {
+    sel.innerHTML = "";
+    $("video-list").innerHTML = '<div class="muted">No movie or TV libraries on this Plex server.</div>';
+    return;
+  }
+  sel.innerHTML = VIDEO.sections.map((s) =>
+    `<option value="${esc(s.title)}" data-type="${esc(s.type)}">${esc(s.title)}${s.type === "show" ? " (TV)" : ""}</option>`).join("");
+  sel.onchange = loadVideoItems;
+  loadVideoItems();
+}
+
+async function loadVideoItems() {
+  const sel = $("video-section");
+  const section = sel.value;
+  const opt = sel.options[sel.selectedIndex];
+  VIDEO.kind = opt?.dataset.type === "show" ? "show" : "movie";
+  VIDEO.selected.clear();
+  VIDEO.shows = {};
+  updateVideoCount();
+  $("video-list").innerHTML = '<div class="muted">Loading…</div>';
+  try {
+    const r = await api(`/api/video/items?section=${encodeURIComponent(section)}&kind=${VIDEO.kind}`);
+    if (r.kind === "show") renderShows(r.items);
+    else renderMovies(r.items);
+  } catch (e) {
+    $("video-list").innerHTML = `<div class="muted">${esc(e.message)}</div>`;
+  }
+}
+
+const thumbUrl = (key) => key ? `/api/video/thumb?key=${encodeURIComponent(key)}` : "";
+const videoMeta = (it) => [it.year, it.width && it.height ? `${it.width}×${it.height}` : null,
+  (it.video_codec || "").toUpperCase(), it.size ? fmtBytes(it.size) : null].filter(Boolean).join(" · ");
+
+function renderMovies(items) {
+  if (!items.length) { $("video-list").innerHTML = '<div class="muted">No movies in this library.</div>'; return; }
+  $("video-list").innerHTML = items.map((m) => `
+    <label class="video-row" data-rk="${esc(m.rating_key)}">
+      <input type="checkbox" class="video-pick" value="${esc(m.rating_key)}">
+      ${m.thumb ? `<img class="video-thumb" loading="lazy" src="${thumbUrl(m.thumb)}" alt="">` : '<span class="video-thumb noimg"></span>'}
+      <span class="video-info"><span class="video-title">${esc(m.title)}</span><span class="video-sub">${esc(videoMeta(m))}</span></span>
+    </label>`).join("");
+  $("video-list").querySelectorAll(".video-pick").forEach((c) => {
+    c.onchange = () => { setVideoSel(c.value, c.checked, c.closest(".video-row").querySelector(".video-title").textContent); };
+  });
+}
+
+function renderShows(items) {
+  if (!items.length) { $("video-list").innerHTML = '<div class="muted">No shows in this library.</div>'; return; }
+  $("video-list").innerHTML = items.map((s) => `
+    <div class="video-show" data-key="${esc(s.key)}">
+      <div class="video-show-head">
+        ${s.thumb ? `<img class="video-thumb" loading="lazy" src="${thumbUrl(s.thumb)}" alt="">` : '<span class="video-thumb noimg"></span>'}
+        <span class="video-info"><span class="video-title">${esc(s.title)}</span><span class="video-sub">${s.episode_count || 0} episodes${s.year ? " · " + s.year : ""}</span></span>
+        <span class="video-expand">▸</span>
+      </div>
+      <div class="video-eps hidden"></div>
+    </div>`).join("");
+  $("video-list").querySelectorAll(".video-show-head").forEach((h) => {
+    h.onclick = () => toggleShow(h.closest(".video-show"));
+  });
+}
+
+async function toggleShow(showEl) {
+  const eps = showEl.querySelector(".video-eps");
+  const arrow = showEl.querySelector(".video-expand");
+  if (!eps.classList.contains("hidden")) { eps.classList.add("hidden"); arrow.textContent = "▸"; return; }
+  arrow.textContent = "▾";
+  eps.classList.remove("hidden");
+  if (eps.dataset.loaded) return;
+  eps.innerHTML = '<div class="muted">Loading episodes…</div>';
+  try {
+    const r = await api(`/api/video/episodes?show_key=${encodeURIComponent(showEl.dataset.key)}`);
+    eps.dataset.loaded = "1";
+    eps.innerHTML = (r.items || []).map((e) => {
+      const tag = `S${String(e.season_number).padStart(2, "0")}E${String(e.episode_number).padStart(2, "0")}`;
+      return `<label class="video-row ep" data-rk="${esc(e.rating_key)}">
+        <input type="checkbox" class="video-pick" value="${esc(e.rating_key)}">
+        <span class="video-tag">${tag}</span>
+        <span class="video-info"><span class="video-title">${esc(e.title)}</span><span class="video-sub">${esc(videoMeta(e))}</span></span></label>`;
+    }).join("") || '<div class="muted">No episodes.</div>';
+    eps.querySelectorAll(".video-pick").forEach((c) => {
+      c.onchange = () => { const row = c.closest(".video-row");
+        setVideoSel(c.value, c.checked, showEl.querySelector(".video-title").textContent + " – " + row.querySelector(".video-title").textContent); };
+    });
+  } catch (e) {
+    eps.innerHTML = `<div class="muted">${esc(e.message)}</div>`;
+  }
+}
+
+function setVideoSel(rk, on, label) {
+  if (on) VIDEO.selected.set(rk, label); else VIDEO.selected.delete(rk);
+  updateVideoCount();
+}
+
+function updateVideoCount() {
+  $("video-count").textContent = `${VIDEO.selected.size} selected`;
+  refreshVideoSyncBtn();
+}
+
+async function updateVideoTarget() {
+  const d = STATE.currentDevice;
+  const tgt = $("video-target");
+  if (!d) { tgt.textContent = "No device selected — pick one under Devices."; tgt.className = "video-target"; refreshVideoSyncBtn(false); return; }
+  tgt.textContent = `Target: ${d.name}…`;
+  try {
+    const q = new URLSearchParams({ device_path: d.path || "", device_type: d.type || "",
+      mtp_busloc: d.busloc || "", transport: d.transport || "", ipod_generation: d.generation || "" });
+    const r = await api(`/api/video/device?${q}`);
+    VIDEO.support = r.video_support;
+    if (r.video_support) {
+      tgt.textContent = `Target: ${d.name} · ${r.profile}`;
+      tgt.className = "video-target ok";
+    } else {
+      tgt.textContent = `${d.name} can't play video iAmped can sync.`;
+      tgt.className = "video-target bad";
+    }
+  } catch (_) { VIDEO.support = false; }
+  refreshVideoSyncBtn();
+}
+
+function refreshVideoSyncBtn(support) {
+  const ok = (support === undefined ? VIDEO.support : support) && VIDEO.selected.size > 0;
+  $("btn-video-sync").disabled = !ok;
+}
+
+async function syncVideo() {
+  const d = STATE.currentDevice;
+  if (!d || !VIDEO.selected.size) return;
+  const keys = [...VIDEO.selected.keys()];
+  const labels = [...VIDEO.selected.values()];
+  if (!confirm(`Sync ${keys.length} video(s) to ${d.name}?\n\n${labels.slice(0, 8).join("\n")}${labels.length > 8 ? "\n…" : ""}`)) return;
+  const s = $("video-status");
+  $("btn-video-sync").disabled = true;
+  s.textContent = "Starting…";
+  showVideoProgress(true);
+  setVideoProgress("Preparing…", 0);
+  const params = { rating_keys: keys, device_path: d.path, device_type: d.type,
+    mtp_busloc: d.busloc || undefined, transport: d.transport || undefined,
+    ipod_generation: d.generation || undefined };
+  try {
+    const { job, error } = await api("/api/video/sync", "POST", params);
+    if (error) { s.textContent = error; showVideoProgress(false); refreshVideoSyncBtn(); return; }
+    pollJob(job, {
+      onProgress: (j) => {
+        // Overall fraction = finished files + the current file's encode fraction,
+        // so the bar advances smoothly through a long single transcode.
+        const total = j.total || 0;
+        const frac = total ? Math.min(1, ((j.done || 0) + (j.item_progress || 0)) / total) : 0;
+        const enc = j.encoder ? ` · ${j.encoder}` : "";
+        setVideoProgress(`${j.message || j.phase}${total ? `  (${j.done}/${total})` : ""}${enc}`, frac);
+        s.textContent = "";
+      },
+      onDone: (r) => {
+        showVideoProgress(false);
+        s.textContent = `Done — ${r.videos_added} added` +
+        (r.videos_skipped ? `, ${r.videos_skipped} already present` : "") +
+        ` (${r.profile}).` + (d.type === "ipod" ? " Eject safely before unplugging." : "");
+        VIDEO.selected.clear();
+        document.querySelectorAll("#video-list .video-pick").forEach((c) => { c.checked = false; });
+        updateVideoCount(); refreshVideoSyncBtn(); },
+      onError: (e) => { showVideoProgress(false); s.textContent = `Error: ${e}`; refreshVideoSyncBtn(); },
+    });
+  } catch (e) { showVideoProgress(false); s.textContent = `Error: ${e.message}`; refreshVideoSyncBtn(); }
+}
+$("btn-video-sync").onclick = syncVideo;
 
 // ---------------------------------------------------------------- visualizer
 function resizeVisualizer() {
