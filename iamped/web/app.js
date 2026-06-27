@@ -1740,6 +1740,11 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".app-menubar")) closeAppMenus();
 });
 document.addEventListener("keydown", (e) => {
+  if (STATE.visualizerFullscreen && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+    e.preventDefault();
+    stepButterchurnPreset(e.key === "ArrowRight" ? 1 : -1);
+    return;
+  }
   if (e.key === "Escape") {
     closeAppMenus();
     if (STATE.visualizerFullscreen) closeFullscreenVisualizer();
@@ -1950,6 +1955,7 @@ function visualizerState() {
       butterchurnConnected: false,
       butterchurnRaf: null,
       butterchurnPresetNames: [],
+      butterchurnPresetIndex: -1,
       nativeFullscreen: false,
     };
   }
@@ -2179,6 +2185,24 @@ function butterchurnApi() {
   if (window.butterchurn?.default?.createVisualizer) return window.butterchurn.default;
   return null;
 }
+function loadButterchurnPreset(index, blendTime = 1.25) {
+  const viz = visualizerState();
+  if (!viz.butterchurn || !viz.butterchurnPresetNames.length) return false;
+  const presets = butterchurnPresetMap();
+  const count = viz.butterchurnPresetNames.length;
+  const normalized = ((index % count) + count) % count;
+  const name = viz.butterchurnPresetNames[normalized];
+  if (!presets[name]) return false;
+  viz.butterchurnPresetIndex = normalized;
+  viz.butterchurn.loadPreset(presets[name], blendTime);
+  return true;
+}
+function stepButterchurnPreset(direction) {
+  const viz = visualizerState();
+  if (!ensureButterchurn()) return;
+  const start = viz.butterchurnPresetIndex >= 0 ? viz.butterchurnPresetIndex : 0;
+  loadButterchurnPreset(start + direction);
+}
 function ensureButterchurn() {
   const api = butterchurnApi();
   if (!ensureVisualizerAudio() || !api) return false;
@@ -2202,7 +2226,7 @@ function ensureButterchurn() {
     viz.butterchurnPresetNames = Object.keys(presets);
     if (viz.butterchurnPresetNames.length) {
       const idx = Math.floor(Math.random() * viz.butterchurnPresetNames.length);
-      viz.butterchurn.loadPreset(presets[viz.butterchurnPresetNames[idx]], 0);
+      loadButterchurnPreset(idx, 0);
     }
   }
   if (!viz.butterchurnConnected && viz.sourceNode) {
