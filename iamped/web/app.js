@@ -1942,6 +1942,19 @@ function visualizerState() {
   }
   return STATE.visualizer;
 }
+function ensurePlayerSource(viz) {
+  if (viz.sourceNode) return true;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return false;
+  if (!viz.audioCtx) viz.audioCtx = new AudioCtx();
+  try {
+    viz.sourceNode = viz.audioCtx.createMediaElementSource(player);
+    return true;
+  } catch (e) {
+    lcd("Visualizer failed", e.message || "Could not read player audio");
+    return false;
+  }
+}
 function audioMotionOptionsForStyle(style) {
   const common = {
     bgAlpha: .16,
@@ -1981,14 +1994,15 @@ function ensureVisualizerAudio() {
     return false;
   }
   try {
+    if (!ensurePlayerSource(viz)) return false;
     if (!viz.audioMotion) {
       viz.audioMotion = new window.AudioMotionAnalyzer($("visualizer-inline"), {
         ...audioMotionOptionsForStyle(STATE.visualizerStyle),
-        source: player,
+        audioCtx: viz.audioCtx,
+        source: viz.sourceNode,
         start: false,
       });
       viz.audioCtx = viz.audioMotion.audioCtx;
-      viz.sourceNode = viz.audioMotion.connectedSources?.[0] || null;
     }
     configureAudioMotion();
     if (viz.audioCtx?.state === "suspended") viz.audioCtx.resume().catch(() => {});
