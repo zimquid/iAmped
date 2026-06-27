@@ -1013,6 +1013,7 @@ async function songRadio(t) {
 
 // ---------------------------------------------------------------- playback
 const player = $("player");
+player.crossOrigin = "anonymous";
 function currentTrack() {
   return STATE.playing >= 0 ? STATE.tracks[STATE.playing] : null;
 }
@@ -1038,16 +1039,17 @@ function playIndex(i) {
   const t = STATE.tracks[i];
   STATE.playbackOffset = 0;
   player.src = streamUrl(t);
-  player.play().catch(() => {});
+  player.play().then(syncVisualizerToPlayback).catch(() => {});
   lcd(t.title, `${t.artist} — ${t.album}`);
   updateFullscreenTitle();
+  prepareVisualizerTrack();
   $("lcd-prog").classList.add("seekable");
   updatePlaybackDisplay(0);
   setPlayIcon(true); renderTracks();
 }
 function togglePlay() {
   if (STATE.playing < 0) { if (STATE.tracks.length) playIndex(0); return; }
-  if (player.paused) { player.play(); setPlayIcon(true); } else { player.pause(); setPlayIcon(false); }
+  if (player.paused) { player.play().then(syncVisualizerToPlayback).catch(() => {}); setPlayIcon(true); } else { player.pause(); setPlayIcon(false); }
 }
 function setPlayIcon(playing) {
   $("t-play").innerHTML = playing
@@ -1933,6 +1935,17 @@ function visualizerState() {
       audioMotion: null,
       audioCtx: null,
       sourceNode: null,
+      sourceTrackKey: null,
+      sourceOffset: 0,
+      sourceStartedAt: 0,
+      audioMotionInput: null,
+      silentGain: null,
+      buffer: null,
+      bufferTrackKey: null,
+      bufferStart: 0,
+      bufferPromise: null,
+      bufferAbort: null,
+      bufferError: null,
       butterchurn: null,
       butterchurnConnected: false,
       butterchurnRaf: null,
@@ -1942,23 +1955,20 @@ function visualizerState() {
   }
   return STATE.visualizer;
 }
-function ensurePlayerSource(viz) {
-  if (viz.sourceNode) return true;
+function ensureVisualizerContext(viz = visualizerState()) {
+  if (viz.audioCtx) return true;
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   if (!AudioCtx) return false;
-  if (!viz.audioCtx) viz.audioCtx = new AudioCtx();
-  try {
-    viz.sourceNode = viz.audioCtx.createMediaElementSource(player);
-    return true;
-  } catch (e) {
-    lcd("Visualizer failed", e.message || "Could not read player audio");
-    return false;
-  }
+  viz.audioCtx = new AudioCtx();
+  viz.silentGain = viz.audioCtx.createGain();
+  viz.silentGain.gain.value = 0;
+  viz.silentGain.connect(viz.audioCtx.destination);
+  return true;
 }
 function audioMotionOptionsForStyle(style) {
   const common = {
     bgAlpha: .16,
-    connectSpeakers: true,
+    connectSpeakers: false,
     fftSize: 2048,
     frequencyScale: "log",
     gradient: "steelblue",
@@ -1994,12 +2004,11 @@ function ensureVisualizerAudio() {
     return false;
   }
   try {
-    if (!ensurePlayerSource(viz)) return false;
+    if (!ensureVisualizerContext(viz)) return false;
     if (!viz.audioMotion) {
       viz.audioMotion = new window.AudioMotionAnalyzer($("visualizer-inline"), {
         ...audioMotionOptionsForStyle(STATE.visualizerStyle),
         audioCtx: viz.audioCtx,
-        source: viz.sourceNode,
         start: false,
       });
       viz.audioCtx = viz.audioMotion.audioCtx;
@@ -2011,6 +2020,117 @@ function ensureVisualizerAudio() {
     lcd("Visualizer failed", e.message || "Could not start audio analyzer");
     return false;
   }
+}
+function visualizerTrackKey() {
+  return currentTrack()?.rating_key || null;
+}
+function visualizerStreamUrl(t, start = playbackPosition()) {
+  const params = new URLSearchParams({ duration: "45" });
+  if (start > 0) params.set("start", start.toFixed(3));
+  return `/api/stream/${encodeURIComponent(t.rating_key)}?${params.toString()}`;
+}
+async function prepareVisualizerTrack() {
+  const track = currentTrack();
+  if (!track) return null;
+  const viz = visualizerState();
+  if (!ensureVisualizerContext(viz)) return null;
+  const key = track.rating_key;
+  const start = Math.max(0, playbackPosition());
+  if (viz.buffer && viz.bufferTrackKey === key && start >= viz.bufferStart && start < viz.bufferStart + viz.buffer.duration - .5) {
+    return viz.buffer;
+  }
+  if (viz.bufferPromise && viz.bufferTrackKey === key && Math.abs(start - viz.bufferStart) < .5) return viz.bufferPromise;
+  if (viz.bufferAbort) viz.bufferAbort.abort();
+  viz.bufferAbort = new AbortController();
+  viz.bufferTrackKey = key;
+  viz.bufferStart = start;
+  viz.buffer = null;
+  viz.bufferError = null;
+  viz.bufferPromise = fetch(visualizerStreamUrl(track, start), { signal: viz.bufferAbort.signal })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.arrayBuffer();
+    })
+    .then((data) => viz.audioCtx.decodeAudioData(data))
+    .then((buffer) => {
+      if (viz.bufferTrackKey !== key || viz.bufferStart !== start) return buffer;
+      viz.buffer = buffer;
+      viz.bufferPromise = null;
+      syncVisualizerToPlayback();
+      return buffer;
+    })
+    .catch((e) => {
+      if (e.name !== "AbortError") {
+        viz.bufferError = e.message || "Could not decode visualizer audio";
+        lcd("Visualizer audio unavailable", viz.bufferError);
+      }
+      if (viz.bufferTrackKey === key) viz.bufferPromise = null;
+      return null;
+    });
+  return viz.bufferPromise;
+}
+function disconnectVisualizerSource() {
+  const viz = visualizerState();
+  if (!viz.sourceNode) return;
+  try { viz.audioMotion?.disconnectInput(viz.audioMotionInput || viz.sourceNode); } catch (_) {}
+  try { if (viz.butterchurnConnected) viz.butterchurn?.disconnectAudio(viz.sourceNode); } catch (_) {}
+  try { viz.sourceNode.disconnect(viz.silentGain); } catch (_) {}
+  try { viz.sourceNode.stop(); } catch (_) {}
+  viz.sourceNode = null;
+  viz.audioMotionInput = null;
+  viz.butterchurnConnected = false;
+  viz.sourceTrackKey = null;
+}
+function startVisualizerSource() {
+  const viz = visualizerState();
+  if (!ensureVisualizerAudio()) return false;
+  const key = visualizerTrackKey();
+  if (!key) return false;
+  if (!viz.buffer || viz.bufferTrackKey !== key) {
+    prepareVisualizerTrack();
+    return false;
+  }
+  const absolutePosition = Math.max(0, playbackPosition());
+  if (absolutePosition < viz.bufferStart || absolutePosition >= viz.bufferStart + viz.buffer.duration - .05) {
+    prepareVisualizerTrack();
+    return false;
+  }
+  const offset = Math.min(Math.max(0, absolutePosition - viz.bufferStart), Math.max(0, viz.buffer.duration - .05));
+  const currentOffset = viz.bufferStart + viz.sourceOffset + (viz.audioCtx.currentTime - viz.sourceStartedAt);
+  if (viz.sourceNode && viz.sourceTrackKey === key && Math.abs(currentOffset - absolutePosition) < .35) return true;
+  disconnectVisualizerSource();
+  const source = viz.audioCtx.createBufferSource();
+  source.buffer = viz.buffer;
+  viz.audioMotionInput = viz.audioMotion.connectInput(source);
+  if (viz.butterchurn) {
+    viz.butterchurn.connectAudio(source);
+    viz.butterchurnConnected = true;
+  }
+  source.connect(viz.silentGain);
+  source.start(0, offset);
+  viz.sourceNode = source;
+  viz.sourceTrackKey = key;
+  viz.sourceOffset = offset;
+  viz.sourceStartedAt = viz.audioCtx.currentTime;
+  source.onended = () => {
+    if (viz.sourceNode !== source) return;
+    disconnectVisualizerSource();
+    if ((STATE.visualizerEnabled || STATE.visualizerFullscreen) && !player.paused) {
+      viz.buffer = null;
+      prepareVisualizerTrack().then(syncVisualizerToPlayback);
+    }
+  };
+  return true;
+}
+function syncVisualizerToPlayback() {
+  const active = STATE.visualizerEnabled || STATE.visualizerFullscreen;
+  if (!active || player.paused) {
+    disconnectVisualizerSource();
+    return;
+  }
+  const viz = visualizerState();
+  if (viz.audioCtx?.state === "suspended") viz.audioCtx.resume().catch(() => {});
+  startVisualizerSource();
 }
 function setAudioMotionStyle(style, showInline = false) {
   STATE.visualizerStyle = style;
@@ -2025,6 +2145,8 @@ function enableVisualizer() {
   $("visualizer-dot").classList.add("active");
   $("visualizer-dot").title = "Hide visualizer";
   STATE.visualizer.audioMotion.toggleAnalyzer(true);
+  prepareVisualizerTrack();
+  syncVisualizerToPlayback();
   requestAnimationFrame(() => STATE.visualizer?.audioMotion?.setOptions({ height: $("visualizer-inline").clientHeight || 52 }));
   updateVisualizerMenuState();
 }
@@ -2034,6 +2156,7 @@ function disableVisualizer() {
   $("visualizer-dot").classList.remove("active");
   $("visualizer-dot").title = "Show visualizer";
   STATE.visualizer?.audioMotion?.toggleAnalyzer(false);
+  if (!STATE.visualizerFullscreen) disconnectVisualizerSource();
   updateVisualizerMenuState();
 }
 function toggleVisualizer() {
@@ -2064,6 +2187,8 @@ function ensureButterchurn() {
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(640, Math.round((rect.width || window.innerWidth) * devicePixelRatio));
   const height = Math.max(360, Math.round((rect.height || window.innerHeight) * devicePixelRatio));
+  canvas.width = width;
+  canvas.height = height;
   if (!viz.butterchurn) {
     viz.butterchurn = api.createVisualizer(viz.audioCtx, canvas, {
       height,
@@ -2095,7 +2220,7 @@ function renderButterchurn() {
   viz.butterchurnRaf = requestAnimationFrame(renderButterchurn);
 }
 async function openFullscreenVisualizer() {
-  if (!ensureButterchurn()) {
+  if (!ensureVisualizerAudio() || !butterchurnApi()) {
     lcd("Visualizer unavailable", "Butterchurn could not be loaded");
     return;
   }
@@ -2104,6 +2229,14 @@ async function openFullscreenVisualizer() {
   $("visualizer-fullscreen").classList.remove("hidden");
   const viz = visualizerState();
   if (viz.butterchurnRaf) cancelAnimationFrame(viz.butterchurnRaf);
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (!ensureButterchurn()) {
+    closeFullscreenVisualizer();
+    lcd("Visualizer unavailable", "Butterchurn could not be loaded");
+    return;
+  }
+  prepareVisualizerTrack();
+  syncVisualizerToPlayback();
   renderButterchurn();
   try {
     await $("visualizer-fullscreen").requestFullscreen?.();
@@ -2119,12 +2252,22 @@ function closeFullscreenVisualizer() {
   $("visualizer-fullscreen").classList.add("hidden");
   if (viz.butterchurnRaf) cancelAnimationFrame(viz.butterchurnRaf);
   viz.butterchurnRaf = null;
+  if (!STATE.visualizerEnabled) disconnectVisualizerSource();
   if (document.fullscreenElement && viz.nativeFullscreen) document.exitFullscreen().catch(() => {});
   viz.nativeFullscreen = false;
   updateVisualizerMenuState();
 }
 player.addEventListener("play", () => {
-  if (STATE.visualizerEnabled || STATE.visualizerFullscreen) ensureVisualizerAudio();
+  if (STATE.visualizerEnabled || STATE.visualizerFullscreen) {
+    prepareVisualizerTrack();
+    syncVisualizerToPlayback();
+  }
+});
+player.addEventListener("pause", () => {
+  if (STATE.visualizerEnabled || STATE.visualizerFullscreen) disconnectVisualizerSource();
+});
+player.addEventListener("seeked", () => {
+  if (STATE.visualizerEnabled || STATE.visualizerFullscreen) syncVisualizerToPlayback();
 });
 player.addEventListener("loadedmetadata", updateFullscreenTitle);
 $("volume").oninput = () => { player.volume = Number($("volume").value); };

@@ -1190,6 +1190,12 @@ def api_playlist_local_delete(pid):
 _NATIVE_STREAM = {"mp3", "m4a", "aac", "mp4", "ogg", "oga", "opus", "wav", "wma"}
 
 
+def _audio_stream_headers(resp: Response) -> Response:
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+    return resp
+
+
 @app.get("/api/stream/<rk>")
 def api_stream(rk):
     lib = _lib()
@@ -1206,8 +1212,12 @@ def api_stream(rk):
         start = max(0.0, float(request.args.get("start", "0") or 0))
     except ValueError:
         return jsonify({"error": "invalid start time"}), 400
+    try:
+        duration = max(0.0, min(120.0, float(request.args.get("duration", "0") or 0)))
+    except ValueError:
+        return jsonify({"error": "invalid duration"}), 400
 
-    if (native and not start) or not have_ffmpeg():
+    if (native and not start and not duration) or not have_ffmpeg():
         # proxy the original, forwarding Range so the browser can seek
         req_range = request.headers.get("Range")
         headers = {"Range": req_range} if req_range else {}
@@ -1217,12 +1227,14 @@ def api_stream(rk):
             if h in up.headers:
                 resp.headers[h] = up.headers[h]
         resp.headers.setdefault("Content-Type", "audio/mpeg")
-        return resp
+        return _audio_stream_headers(resp)
 
     # transcode lossless -> mp3 on the fly for in-browser playback
     command = ["ffmpeg", "-loglevel", "error"]
     if start:
         command.extend(["-ss", f"{start:.3f}"])
+    if duration:
+        command.extend(["-t", f"{duration:.3f}"])
     command.extend(
         ["-i", url, "-map", "0:a:0",
          "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "-"],
@@ -1238,7 +1250,7 @@ def api_stream(rk):
                 yield chunk
         finally:
             proc.kill()
-    return Response(gen(), mimetype="audio/mpeg")
+    return _audio_stream_headers(Response(gen(), mimetype="audio/mpeg"))
 
 
 @app.get("/api/volumes")

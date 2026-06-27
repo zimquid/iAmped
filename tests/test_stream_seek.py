@@ -58,6 +58,27 @@ class StreamSeekTest(unittest.TestCase):
         self.assertLess(command.index("-ss"), command.index("-i"))
         self.assertTrue(process.killed)
 
+    def test_visualizer_window_limits_transcode_duration(self):
+        process = FakeProcess()
+        with (
+            patch.object(server_module, "_lib", return_value=FakeLibrary()),
+            patch.object(server_module, "get_server", return_value=object()),
+            patch.object(server_module.plex_client, "stream_url",
+                         return_value="https://plex.example/file.flac"),
+            patch.object(server_module, "have_ffmpeg", return_value=True),
+            patch.object(server_module.subprocess, "Popen",
+                         return_value=process) as popen,
+        ):
+            response = self.client.get("/api/stream/123?start=12.500&duration=45")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, b"audio")
+            self.assertEqual(response.headers["Access-Control-Allow-Origin"], "*")
+            self.assertEqual(response.headers["Cross-Origin-Resource-Policy"], "cross-origin")
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-ss") + 1], "12.500")
+        self.assertEqual(command[command.index("-t") + 1], "45.000")
+
 
 if __name__ == "__main__":
     unittest.main()
