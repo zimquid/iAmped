@@ -12,8 +12,8 @@ import webbrowser
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from . import (artwork, config, device_management, filler, inventory, matcher,
-               plex_client, readback)
+from . import (artwork, config, device_management, filler, ingest, inventory,
+               matcher, plex_client, readback)
 from .library import Library
 from .sync import (BACKENDS, free_bytes, list_volumes, target_format,
                    total_bytes, transcode)
@@ -1517,6 +1517,35 @@ def _remove_ipod_videos(path: str, name: str, track_ids: set) -> dict:
     return {"removed": len(drop), "freed_bytes": freed}
 
 
+def _remove_ipod_tracks(path: str, name: str, track_ids: set) -> dict:
+    """Rebuild the iTunesDB without the given track_ids (audio or video) and
+    delete their files. Mirrors _remove_ipod_videos but is media-agnostic, so it
+    can drop music. Everything else (foreign content) is preserved by
+    import_existing(); finalize() backs up the existing DB first."""
+    backend = itunesdb.ITunesDBBackend(path, name or "iPod")
+    backend.prepare()
+    backend.import_existing()
+    keep, drop = [], []
+    for e in backend._entries:
+        (drop if e.track_id in track_ids else keep).append(e)
+    if not drop:
+        return {"removed": 0, "freed_bytes": 0}
+    backend._entries = keep
+    backend._by_key = {k: v for k, v in backend._by_key.items() if v in keep}
+    backend.finalize()                       # writes backup + rebuilt DB
+    freed = 0
+    for e in drop:                           # then delete the media files
+        rel = itunesdb.location_to_relpath(e.location)
+        full = os.path.join(path, rel) if rel else None
+        if full and os.path.exists(full):
+            try:
+                freed += os.path.getsize(full)
+                os.remove(full)
+            except OSError:
+                pass
+    return {"removed": len(drop), "freed_bytes": freed}
+
+
 def _remove_massstorage_videos(path: str, rels: set) -> dict:
     from .sync import MassStorageBackend
     removed = freed = 0
@@ -1559,6 +1588,122 @@ def api_device_video_remove():
     except Exception as exc:  # noqa: BLE001 - surfaced to UI
         return jsonify({"error": str(exc)}), 400
     return jsonify({"ok": True, **res})
+
+
+@app.post("/api/device/music/remove")
+def api_device_music_remove():
+    """Delete selected music tracks from the device. The Plex library is never
+    touched — this only removes the on-device copy and rebuilds the device's
+    own database (iPod) / forgets the locations (mass storage)."""
+    p = request.json or {}
+    path = p.get("device_path", "")
+    dtype = "ipod" if p.get("device_type") == "ipod" else "massstorage"
+    if not os.path.isdir(path):
+        return jsonify({"error": "Device path does not exist."}), 400
+    try:
+        if dtype == "ipod":
+            ids = {int(i) for i in p.get("track_ids", [])}
+            if not ids:
+                return jsonify({"error": "No tracks selected."}), 400
+            with device_management.device_lock(path, "ipod"):
+                res = _remove_ipod_tracks(path, p.get("device_name"), ids)
+        else:
+            rels = set(p.get("locations", []))
+            if not rels:
+                return jsonify({"error": "No tracks selected."}), 400
+            with device_management.device_lock(path, "massstorage"):
+                res = _remove_massstorage_videos(path, rels)
+    except Exception as exc:  # noqa: BLE001 - surfaced to UI
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, **res})
+
+
+@app.get("/api/plex/music/locations")
+def api_plex_music_locations():
+    """Server-side folder paths for each music section, so the UI can hint which
+    folder Plex actually watches when picking an ingest destination."""
+    try:
+        server = get_server()
+        out = []
+        for s in server.library.sections():
+            if s.type == "artist":
+                out.append({"title": s.title,
+                            "locations": list(getattr(s, "locations", []) or [])})
+        return jsonify({"sections": out})
+    except Exception as exc:  # noqa: BLE001 - surfaced to UI
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/device/ingest/preview")
+def api_device_ingest_preview():
+    p = request.json or {}
+    path = p.get("device_path", "")
+    dtype = "ipod" if p.get("device_type") == "ipod" else "massstorage"
+    if not os.path.isdir(path):
+        return jsonify({"error": "Device path does not exist."}), 400
+    try:
+        res = ingest.plan(_lib(), path, dtype,
+                          p.get("track_ids"), p.get("locations"))
+    except Exception as exc:  # noqa: BLE001 - surfaced to UI
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(res)
+
+
+def _ingest_job(job, p):
+    path = p["device_path"]
+    dtype = "ipod" if p.get("device_type") == "ipod" else "massstorage"
+    cfg = config.load()
+    ingest_dir = cfg.get("ingest_dir") or ""
+    section = cfg.get("ingest_section") or cfg.get("music_section") or ""
+    name = p.get("device_name")
+
+    def batch_remove(confirmed):
+        if dtype == "ipod":
+            ids = {int(i["track_id"]) for i in confirmed
+                   if i.get("track_id") is not None}
+            return _remove_ipod_tracks(path, name, ids) if ids else {}
+        rels = {i["location"] for i in confirmed if i.get("location")}
+        return _remove_massstorage_videos(path, rels) if rels else {}
+
+    def prog(phase, done, total):
+        job["phase"] = phase
+        job["done"], job["total"] = done, total
+        job["message"] = (f"Copying to Plex… {done}/{total}" if phase == "copying"
+                          else f"Waiting for Plex to scan… {done}/{total}")
+
+    with device_management.device_lock(path, dtype):
+        server = get_server()
+        job["result"] = ingest.apply(
+            server, _lib(), path, dtype, p.get("items", []),
+            ingest_dir, section, progress=prog, batch_remove=batch_remove)
+    r = job["result"]
+    job["message"] = (
+        f"Ingested {r['confirmed']}/{r['ingested']} into Plex"
+        + (f", removed {r['removed_from_device']} from device" if r['removed_from_device'] else "")
+        + (f", {len(r['unconfirmed'])} left on device (not yet in Plex)" if r['unconfirmed'] else "")
+        + ".")
+
+
+@app.post("/api/device/ingest")
+def api_device_ingest():
+    p = request.json or {}
+    if not os.path.isdir(p.get("device_path", "")):
+        return jsonify({"error": "Device path does not exist."}), 400
+    if not [i for i in (p.get("items") or []) if i.get("status") == "ingest"]:
+        return jsonify({"error": "Nothing to ingest."}), 400
+    cfg = config.load()
+    ingest_dir = cfg.get("ingest_dir") or ""
+    if not ingest_dir:
+        return jsonify({"error": "Set an ingest folder first (Device → Ingest folder)."}), 400
+    try:
+        os.makedirs(ingest_dir, exist_ok=True)
+        if not os.access(ingest_dir, os.W_OK):
+            raise OSError("not writable")
+    except OSError:
+        return jsonify({"error": f"Ingest folder is not writable: {ingest_dir}"}), 400
+    if not (cfg.get("ingest_section") or cfg.get("music_section")):
+        return jsonify({"error": "No music section configured to scan."}), 400
+    return jsonify({"job": start_job(_ingest_job, p)})
 
 
 @app.get("/api/device/profile")

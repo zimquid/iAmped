@@ -345,11 +345,20 @@ def sonically_similar(server: PlexServer, rating_key: str,
         similar = track.sonicallySimilar(limit=limit)
     except Exception as exc:  # server without Sonic Analysis raises
         return [], f"Sonic Analysis unavailable for this track ({exc})."
+    from .filler import radio_key
     metas = []
+    seen_keys: set[str] = set()
+    seen_song: set[str] = set()                 # fold same song from other albums/variants
     for t in [track] + list(similar):          # seed first
         m = track_to_meta(t)
-        if m:
-            metas.append(m)
+        if not m or m.rating_key in seen_keys:
+            continue
+        song = radio_key(m.artist, m.title)
+        if song in seen_song:
+            continue
+        seen_keys.add(m.rating_key)
+        seen_song.add(song)
+        metas.append(m)
     if len(metas) <= 1:
         return metas, "No sonically similar tracks were returned (is Sonic Analysis enabled?)."
     return metas, None
@@ -380,8 +389,10 @@ def station_tracks(server: PlexServer, section_title: str, station_title: str,
     if st is None:
         return [], f"Station “{station_title}” is not available for this library."
 
+    from .filler import radio_key
     metas: list[TrackMeta] = []
-    seen: set[str] = set()
+    seen: set[str] = set()                     # rating_keys already taken
+    seen_song: set[str] = set()                # song identity — same song, any album/variant
     for _ in range(12):                       # cap the polling
         try:
             pq = PlayQueue.fromStationKey(server, st.key)
@@ -394,12 +405,17 @@ def station_tracks(server: PlexServer, section_title: str, station_title: str,
             if getattr(t, "type", None) != "track":
                 continue
             m = track_to_meta(t)
-            if m and m.rating_key not in seen:
-                seen.add(m.rating_key)
-                metas.append(m)
-                fresh += 1
-                if len(metas) >= limit:
-                    return metas, None
+            if not m or m.rating_key in seen:
+                continue
+            song = radio_key(m.artist, m.title)
+            if song in seen_song:              # same song from another album/variant
+                continue
+            seen.add(m.rating_key)
+            seen_song.add(song)
+            metas.append(m)
+            fresh += 1
+            if len(metas) >= limit:
+                return metas, None
         if fresh == 0:                        # station exhausted / repeating
             break
     if not metas:
@@ -501,16 +517,19 @@ def artist_radio(server: PlexServer, artist, method: str = "station",
             if b is not None:
                 ordered.append(b)
 
+    from .filler import radio_key
     metas: list[TrackMeta] = []
     seen_keys: set[str] = set()
-    seen_song: set[str] = set()       # (artist, title) — drop same song, other version
+    seen_song: set[str] = set()       # song identity — drop same song, other album/variant
     for t in ordered:
         if getattr(t, "type", "track") != "track":
             continue
         m = track_to_meta(t)
         if not m or m.rating_key in seen_keys:
             continue
-        song = (m.artist.strip().lower(), m.title.strip().lower())
+        # Album-agnostic identity (folds unicode/punctuation/feat./remaster/live)
+        # so the same song from a different album or release doesn't duplicate.
+        song = radio_key(m.artist, m.title)
         if song in seen_song:
             continue
         seen_keys.add(m.rating_key)
@@ -521,6 +540,35 @@ def artist_radio(server: PlexServer, artist, method: str = "station",
     if not metas:
         return [], warn or "Plex returned no playable radio tracks for this artist."
     return metas, warn
+
+
+def scan_path(server: PlexServer, section_title: str, path: str | None = None) -> None:
+    """Trigger a Plex library scan, optionally scoped to a single folder so the
+    server picks up newly-dropped files without a full rescan."""
+    section = server.library.section(section_title)
+    if path:
+        section.update(path=path)
+    else:
+        section.update()
+
+
+def track_in_library(server: PlexServer, section_title: str,
+                     artist: str, title: str) -> bool:
+    """Whether a track matching (artist, title) now exists in the section —
+    used to confirm an ingested file was actually scanned in before we delete
+    it from the device. Album-agnostic, same identity as the radio dedup."""
+    from .filler import match_key
+    want = match_key(artist, title)
+    try:
+        section = server.library.section(section_title)
+        hits = section.searchTracks(title=title, maxresults=30)
+    except Exception:  # noqa: BLE001
+        return False
+    for t in hits:
+        cand_artist = _first(t, "grandparentTitle", "originalTitle", default="")
+        if match_key(cand_artist, getattr(t, "title", "")) == want:
+            return True
+    return False
 
 
 def stream_url(server: PlexServer, part_key: str) -> str:

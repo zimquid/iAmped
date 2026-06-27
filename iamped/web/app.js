@@ -153,6 +153,7 @@ async function loadConfig() {
   STATE.bitrateByFormat.aac = Number(cfg.aac_bitrate_k) || 256;
   STATE.bitrateByFormat.mp3 = Number(cfg.mp3_bitrate_k) || 320;
   $("mirror").checked = cfg.mirror !== false;
+  if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   toggleDeviceType();
   if (!cfg.has_ffmpeg) { $("ffmpeg-note").textContent = "(ffmpeg not found — lossless copied as-is, FLAC won't play in-app)"; $("transcode").checked = false; }
@@ -576,13 +577,17 @@ async function openDeviceMusic(el) {
   lcd("Reading device…", path);
   try {
     const inv = await api(`/api/device/inventory?device_path=${encodeURIComponent(path)}&device_type=${type}`);
+    STATE.deviceMusic = { path, type, name: el.dataset.name };
     STATE.tracks = (inv.tracks || []).filter((t) => t.media !== "video").map((t, i) => ({
-      rating_key: t.rating_key || `dev:${i}`,
+      rating_key: `dev:${i}`,            // stable selection id (device tracks aren't all in Plex)
       title: t.title, artist: t.artist, album: t.album,
       duration_ms: t.duration_ms || 0, plays: t.play_count || 0,
-      rating: t.rating || 0, lossless: false, on_device: true,
+      rating: t.stars || 0, lossless: false, on_device: true,
+      _origin: t.origin, _track_id: t.track_id, _location: t.location,
+      _size: t.size || 0, _plex_rk: t.rating_key || null,
     }));
     renderTracks();
+    updateDeviceMusicActions();
     lcd("iAmped", `${STATE.tracks.length.toLocaleString()} tracks on ${el.dataset.name}`);
   } catch (e) {
     $("browse-body").innerHTML = `<div class="src-item disabled" style="padding:14px">${esc(e.message)}</div>`;
@@ -756,6 +761,7 @@ function renderTracks() {
   const body = $("browse-body");
   body.innerHTML = STATE.tracks.map((t, i) => rowHtml(t, i)).join("");
   bindRows([...body.querySelectorAll(".songrow")]);
+  updateDeviceMusicActions();
   bottomBrowse();
 }
 // Append a page of rows WITHOUT rebuilding the list, so the scroll position is
@@ -773,6 +779,135 @@ function selectRow(idx, additive) {
   if (!additive) STATE.selected.clear();
   if (STATE.selected.has(rk) && additive) STATE.selected.delete(rk); else STATE.selected.add(rk);
   document.querySelectorAll("#browse-body .songrow").forEach((r) => r.classList.toggle("selected", STATE.selected.has(r.dataset.rk)));
+  if (STATE.view?.type === "device") updateDeviceMusicActions();
+}
+
+// ---- device music: remove / ingest action bar ---------------------------
+function _selectedDeviceTracks() {
+  return STATE.tracks.filter((t) => STATE.selected.has(t.rating_key));
+}
+function updateDeviceMusicActions() {
+  const bar = $("device-music-actions");
+  if (!bar) return;
+  const on = STATE.view?.type === "device";
+  bar.classList.toggle("hidden", !on);
+  if (!on) return;
+  const foreign = STATE.tracks.filter((t) => t._origin === "foreign").length;
+  const sel = _selectedDeviceTracks();
+  $("dm-summary").textContent = sel.length
+    ? `${sel.length} selected`
+    : `${STATE.tracks.length} tracks · ${foreign} not from Plex`;
+  $("btn-dm-remove").disabled = !sel.length;
+  $("btn-dm-ingest").disabled = !sel.length;
+}
+function selectForeignDeviceTracks() {
+  STATE.selected.clear();
+  STATE.tracks.forEach((t) => { if (t._origin === "foreign") STATE.selected.add(t.rating_key); });
+  document.querySelectorAll("#browse-body .songrow").forEach((r) => r.classList.toggle("selected", STATE.selected.has(r.dataset.rk)));
+  updateDeviceMusicActions();
+}
+function _deviceRemoveBody(tracks) {
+  const dm = STATE.deviceMusic;
+  const body = { device_path: dm.path, device_type: dm.type, device_name: dm.name };
+  if (dm.type === "ipod") body.track_ids = tracks.map((t) => t._track_id).filter((x) => x != null);
+  else body.locations = tracks.map((t) => t._location).filter(Boolean);
+  return body;
+}
+async function removeSelectedDeviceMusic() {
+  const sel = _selectedDeviceTracks();
+  if (!sel.length) return;
+  if (!confirm(`Remove ${sel.length} track(s) from the device? The files are deleted from the device; your Plex library is untouched.`)) return;
+  $("btn-dm-remove").disabled = true;
+  try {
+    const r = await api("/api/device/music/remove", "POST", _deviceRemoveBody(sel));
+    if (r.error) { alert(r.error); return; }
+    lcd("iAmped", `Removed ${r.removed} — freed ${fmtBytes(r.freed_bytes || 0)}.` +
+      (STATE.deviceMusic.type === "ipod" ? " Eject safely before unplugging." : ""));
+    STATE.selected.clear();
+    await reloadDeviceMusic();
+    await loadSidebar();
+  } catch (e) { alert(e.message); }
+  finally { updateDeviceMusicActions(); }
+}
+async function reloadDeviceMusic() {
+  const dm = STATE.deviceMusic; if (!dm) return;
+  const inv = await api(`/api/device/inventory?device_path=${encodeURIComponent(dm.path)}&device_type=${dm.type}`);
+  STATE.tracks = (inv.tracks || []).filter((t) => t.media !== "video").map((t, i) => ({
+    rating_key: `dev:${i}`, title: t.title, artist: t.artist, album: t.album,
+    duration_ms: t.duration_ms || 0, plays: t.play_count || 0, rating: t.stars || 0,
+    lossless: false, on_device: true, _origin: t.origin, _track_id: t.track_id,
+    _location: t.location, _size: t.size || 0, _plex_rk: t.rating_key || null,
+  }));
+  renderTracks(); updateDeviceMusicActions();
+}
+
+// ---- device music: ingest back into Plex --------------------------------
+let INGEST = { items: [] };
+async function ingestSelectedDeviceMusic() {
+  const sel = _selectedDeviceTracks();
+  if (!sel.length) return;
+  const dm = STATE.deviceMusic;
+  $("btn-dm-ingest").disabled = true;
+  lcd("Ingest", "Checking which tracks Plex already has…");
+  try {
+    const body = { device_path: dm.path, device_type: dm.type };
+    if (dm.type === "ipod") body.track_ids = sel.map((t) => t._track_id).filter((x) => x != null);
+    else body.locations = sel.map((t) => t._location).filter(Boolean);
+    const r = await api("/api/device/ingest/preview", "POST", body);
+    INGEST.items = r.items || [];
+    $("ingest-wizard-summary").textContent =
+      `${r.ingest_count} track(s) to add to Plex (${fmtBytes(r.ingest_bytes)})` +
+      (r.skip_count ? ` · ${r.skip_count} already in Plex (skipped)` : "");
+    $("ingest-list").innerHTML = INGEST.items.map((it) => {
+      const skip = it.status === "skip_exists";
+      return `<div class="songrow" style="opacity:${skip ? .55 : 1}">
+        <div class="c-name">${esc(it.title || "Untitled")}${skip ? ' <span class="lossless-tag">in Plex</span>' : ''}</div>
+        <div class="c-artist">${esc(it.artist || "")}</div>
+        <div class="c-time">${fmtBytes(it.size || 0)}</div></div>`;
+    }).join("") || `<div class="muted" style="padding:12px">Nothing selected.</div>`;
+    $("ingest-status").textContent = "";
+    $("ingest-confirm").disabled = r.ingest_count === 0;
+    $("ingest-wizard").classList.remove("hidden");
+    lcd("iAmped", `${r.ingest_count} to ingest, ${r.skip_count} already in Plex`);
+  } catch (e) {
+    alert(e.message); lcd("iAmped", e.message);
+  } finally { updateDeviceMusicActions(); }
+}
+function closeIngest() { $("ingest-wizard").classList.add("hidden"); }
+async function confirmIngest() {
+  const dm = STATE.deviceMusic;
+  const s = $("ingest-status"); s.className = "status"; s.textContent = "Starting…";
+  $("ingest-confirm").disabled = true;
+  try {
+    const { job } = await api("/api/device/ingest", "POST", {
+      device_path: dm.path, device_type: dm.type, device_name: dm.name,
+      items: INGEST.items });
+    pollJob(job, {
+      onProgress: (j) => { s.textContent = j.message || "Working…"; lcd("Ingest", j.message || ""); },
+      onDone: async (j) => {
+        const r = j.result || {};
+        s.className = "status ok"; s.textContent = j.message;
+        lcd("iAmped", j.message);
+        STATE.selected.clear();
+        await reloadDeviceMusic(); await loadSidebar(); await refreshStats();
+        if (!(r.unconfirmed || []).length) setTimeout(closeIngest, 1500);
+      },
+      onError: (e) => { s.className = "status err"; s.textContent = e; $("ingest-confirm").disabled = false; },
+    });
+  } catch (e) { s.className = "status err"; s.textContent = e.message; $("ingest-confirm").disabled = false; }
+}
+async function saveIngestDir() {
+  const dir = $("ingest-dir").value.trim();
+  try {
+    await api("/api/config", "POST", { ingest_dir: dir });
+    const hint = $("ingest-dir-hint");
+    hint.textContent = "Saved.";
+    try {
+      const r = await api("/api/plex/music/locations");
+      const locs = (r.sections || []).flatMap((s) => s.locations);
+      if (locs.length) hint.textContent = "Saved. Plex watches: " + locs.join(", ");
+    } catch (e) {}
+  } catch (e) { alert(e.message); }
 }
 
 // sorting
@@ -1518,6 +1653,12 @@ $("btn-save-profile").onclick = saveDeviceProfile;
 $("btn-restore").onclick = restoreBackup;
 $("btn-eject").onclick = () => ejectDevice();
 $("btn-match").onclick = matchDeviceFiles;
+$("btn-dm-select-foreign").onclick = selectForeignDeviceTracks;
+$("btn-dm-remove").onclick = removeSelectedDeviceMusic;
+$("btn-dm-ingest").onclick = ingestSelectedDeviceMusic;
+$("btn-save-ingest").onclick = saveIngestDir;
+$("ingest-cancel").onclick = closeIngest;
+$("ingest-confirm").onclick = confirmIngest;
 $("src-music").onclick = openLibrary;
 $("btn-close-inspector").onclick = closeDeviceInspector;
 $("view-inspector").onclick = () => {

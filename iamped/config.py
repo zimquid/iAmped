@@ -51,6 +51,8 @@ DEFAULTS: dict[str, Any] = {
     "plex_token": "",
     "plex_client_id": "",        # stable device identity used by Plex OAuth
     "music_section": "",        # name of the Plex music library section
+    "ingest_dir": "",           # writable, Plex-watched folder for ingest-back
+    "ingest_section": "",       # music section to scan after ingest (defaults to music_section)
     "cache_dir": str(CACHE_DIR),
     # last-used sync settings, remembered for convenience
     "last_device_path": "",
