@@ -37,6 +37,58 @@ def match_key(artist: str | None, title: str | None) -> str:
     return _norm(artist) + "\x00" + _norm(title)
 
 
+# Words that mark a *release variant* of an otherwise-identical recording. The
+# same song pulled from a different album/single almost always differs only by
+# one of these tags ("(2009 Remaster)", "- Live", "(Radio Edit)"), so radio/
+# station dedup must fold them out or the same song reappears from each album.
+_VARIANT_WORDS = (
+    r"remaster(?:ed)?|remix|re[- ]?recorded|re[- ]?rec|mono|stereo|"
+    r"radio edit|radio version|single version|album version|original version|"
+    r"extended(?: version| mix)?|deluxe|bonus(?: track)?|anniversary|"
+    r"explicit|clean|edit|edited|version|live(?: at .*| from .*| in .*)?|"
+    r"acoustic|instrumental|demo|session|reprise|alternate(?: take| version)?|"
+    r"take \d+|mix|expanded"
+)
+# Parenthetical/bracketed group that is *only* a variant tag (optionally with a
+# leading year, e.g. "(2011 Remastered)"), or a trailing " - <variant>" segment.
+_VARIANT_PAREN = re.compile(
+    rf"[\(\[]\s*(?:\d{{4}}\s+)?(?:{_VARIANT_WORDS})\b[^\)\]]*[\)\]]",
+    re.IGNORECASE)
+_VARIANT_DASH = re.compile(
+    rf"\s+-\s+(?:\d{{4}}\s+)?(?:{_VARIANT_WORDS})\b.*$", re.IGNORECASE)
+# A "feat./featuring/with" credit — folded out of both artist and title so the
+# album cut and the "(feat. X)" single collapse to one song.
+_FEAT = re.compile(
+    r"[\(\[]?\s*(?:feat\.?|featuring|ft\.?|with)\s+[^\)\]]*[\)\]]?\s*",
+    re.IGNORECASE)
+
+
+def _strip_variants(title: str | None) -> str:
+    """Drop release-variant tags (remaster/live/radio-edit/feat./…) from a title
+    so the same recording on different albums collapses to one identity."""
+    s = title or ""
+    s = _VARIANT_PAREN.sub(" ", s)
+    s = _VARIANT_DASH.sub(" ", s)
+    s = _FEAT.sub(" ", s)
+    return s
+
+
+def radio_key(artist: str | None, title: str | None) -> str:
+    """Aggressive song identity for radio/station/playlist dedup: like
+    :func:`match_key` but also folds out release-variant tags and feat. credits,
+    so a song doesn't reappear once per album/remaster/edit it lives on.
+
+    Kept separate from match_key (which gates device-presence and must not treat
+    a remaster as already-present) so the looser folding stays scoped to dedup.
+    The stripped title can go empty (a title that is *only* a tag, e.g.
+    "(Live)") — fall back to the raw normalized title so it never collapses to
+    the artist alone."""
+    stripped = _norm(_strip_variants(title))
+    if not stripped:
+        stripped = _norm(title)
+    return _norm(_FEAT.sub(" ", artist or "")) + "\x00" + stripped
+
+
 def is_lossless(track: dict) -> bool:
     return (track.get("container") or "").lower() in LOSSLESS \
         or (track.get("codec") or "").lower() in LOSSLESS

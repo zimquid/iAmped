@@ -170,6 +170,12 @@
             </div>
             <button id="btn-del-pl" class="hidden">Delete playlist</button>
           </div>
+          <div class="browse-actions device-actions hidden" id="device-music-actions">
+            <span id="dm-summary" class="sub"></span>
+            <button id="btn-dm-select-foreign" title="Select tracks that didn't come from your Plex library">Select foreign</button>
+            <button id="btn-dm-ingest" title="Copy selected tracks into your Plex server, then remove them from the device once Plex has them">⇪ Ingest to Plex…</button>
+            <button id="btn-dm-remove" title="Delete selected tracks from the device (Plex is untouched)">🗑 Remove from device</button>
+          </div>
         </div>
         <div class="songlist">
           <div class="songhead" id="browse-head-row">
@@ -301,6 +307,12 @@
             <button id="btn-match">Match files without Plex IDs</button>
             <span class="muted" id="match-status"></span>
           </div>
+          <div>
+            <b>Ingest folder</b>
+            <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
+            <button id="btn-save-ingest">Save</button>
+            <div class="muted" id="ingest-dir-hint" style="font-size:11px; margin-top:4px;"></div>
+          </div>
         </div>
 
         <hr style="border:0; border-top:1px solid #e3e3e3; margin:18px 0;">
@@ -361,6 +373,25 @@
         <div class="transfer-actions">
           <button id="transfer-cancel">Cancel</button>
           <button class="aqua" id="transfer-apply">Apply &amp; Preview</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="transfer-wizard hidden" id="ingest-wizard" role="dialog" aria-modal="true" aria-labelledby="ingest-wizard-title">
+    <div class="transfer-sheet">
+      <div class="transfer-icon">⇪</div>
+      <div class="transfer-copy">
+        <h2 id="ingest-wizard-title">Ingest into Plex</h2>
+        <p id="ingest-wizard-summary"></p>
+        <div class="songlist" style="max-height:240px; margin:8px 0;">
+          <div class="songbody" id="ingest-list"></div>
+        </div>
+        <p class="muted" style="font-size:11px;">Files are copied into your ingest folder, Plex is scanned, and only tracks Plex confirms are then removed from the device. Tracks already in Plex are skipped (your existing copy is kept).</p>
+        <div class="status" id="ingest-status"></div>
+        <div class="transfer-actions">
+          <button id="ingest-cancel">Cancel</button>
+          <button class="aqua" id="ingest-confirm">Ingest &amp; remove from device</button>
         </div>
       </div>
     </div>
