@@ -164,16 +164,31 @@ def iter_tracks(server: PlexServer, section_title: str,
                 progress=None) -> Iterator[TrackMeta]:
     """Yield every track in a music section. `progress(done, total)` optional."""
     section = server.library.section(section_title)
-    total = section.totalSize if hasattr(section, "totalSize") else None
     done = 0
-    # searchTracks paginates internally in plexapi via container args.
-    for track in section.searchTracks():
-        meta = track_to_meta(track)
-        done += 1
-        if progress and (done % 50 == 0 or done == total):
-            progress(done, total)
-        if meta:
-            yield meta
+    total = None
+    page_size = 200
+
+    while True:
+        page = section.searchTracks(
+            container_start=done,
+            container_size=page_size,
+            maxresults=page_size,
+        )
+        if total is None:
+            total = getattr(page, "totalSize", None) or len(page)
+            if progress:
+                progress(done, total)
+        if not page:
+            break
+        for track in page:
+            meta = track_to_meta(track)
+            done += 1
+            if progress and (done % 50 == 0 or done == total):
+                progress(done, total)
+            if meta:
+                yield meta
+        if total is not None and done >= total:
+            break
 
 
 def video_sections(server: PlexServer) -> list[dict]:

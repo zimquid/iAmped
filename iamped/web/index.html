@@ -8,6 +8,25 @@
 </head>
 <body>
 <div class="itunes">
+  <div class="app-menubar" id="app-menubar">
+    <button class="app-menu-button" id="file-menu-button" data-menu="file">File</button>
+    <button class="app-menu-button" id="view-menu-button" data-menu="view">View</button>
+    <div class="app-menu-panel hidden" id="file-menu-panel">
+      <button class="app-menu-row" data-action="server">Server</button>
+      <button class="app-menu-row" data-action="music">Music</button>
+    </div>
+    <div class="app-menu-panel hidden" id="view-menu-panel">
+      <button class="app-menu-row" data-action="toggle-visualizer"><span class="menu-check" id="menu-check-mini"></span>Status Visualizer</button>
+      <button class="app-menu-row" data-action="fullscreen-visualizer">Full Screen Visualizer</button>
+      <div class="app-menu-sep"></div>
+      <button class="app-menu-row" data-action="viz-bars"><span class="menu-check" id="menu-check-bars"></span>audioMotion Bars</button>
+      <button class="app-menu-row" data-action="viz-spectrum"><span class="menu-check" id="menu-check-spectrum"></span>audioMotion Spectrum</button>
+      <button class="app-menu-row" data-action="viz-led"><span class="menu-check" id="menu-check-led"></span>audioMotion LEDs</button>
+      <button class="app-menu-row" data-action="viz-butterchurn"><span class="menu-check" id="menu-check-butterchurn"></span>Butterchurn Full Screen</button>
+      <div class="app-menu-sep"></div>
+      <button class="app-menu-row" data-action="inspector">Device Inspector</button>
+    </div>
+  </div>
 
   <div class="toolbar">
     <div class="transport">
@@ -20,6 +39,7 @@
       <input id="volume" type="range" min="0" max="1" step=".02" value="1">
     </div>
     <div class="lcd" id="lcd">
+      <button class="visualizer-dot" id="visualizer-dot" title="Show visualizer" aria-label="Show visualizer"></button>
       <div class="lcd-stage">
         <div class="lcd-copy">
           <div class="lcd-main" id="lcd-main">iAmped</div>
@@ -31,15 +51,9 @@
           </div>
         </div>
         <div class="lcd-visualizer" id="lcd-visualizer">
-          <canvas id="visualizer-canvas"></canvas>
+          <div id="visualizer-inline"></div>
         </div>
       </div>
-      <button class="lcd-viz-toggle" id="lcd-viz-toggle" title="Show visualizer" aria-pressed="false">◂</button>
-    </div>
-    <div class="view-switch" aria-label="View">
-      <button id="view-list" class="active" title="List view"><svg viewBox="0 0 16 16"><path d="M2 3h12v2H2zm0 4h12v2H2zm0 4h12v2H2z"/></svg></button>
-      <button id="view-visualizer" title="Visualizer"><svg viewBox="0 0 16 16"><path d="M2 11V7h2v4zm4 0V3h2v8zm4 0V5h2v6zm4 0V2h2v9z"/></svg></button>
-      <button id="view-inspector" title="Device inspector"><svg viewBox="0 0 16 16"><path d="M2 2h12v12H2zm8 1v10h3V3z"/></svg></button>
     </div>
     <div class="search">
       <svg viewBox="0 0 16 16"><path d="M6.5 1a5.5 5.5 0 014.2 9l4.1 4.1-1.4 1.4-4.1-4.1A5.5 5.5 0 116.5 1zm0 2a3.5 3.5 0 100 7 3.5 3.5 0 000-7z"/></svg>
@@ -49,10 +63,10 @@
 
   <div class="body">
     <div class="sidebar">
-      <div class="src-section">Setup</div>
+      <div class="src-section">Server</div>
       <div class="src-item" data-pane="pane-plex">
         <svg viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="4" fill="none" stroke="#5f6b7e"/><rect x="2" y="7" width="12" height="4" fill="none" stroke="#5f6b7e"/></svg>
-        Plex Server</div>
+        Server</div>
 
       <div class="src-section">Library</div>
       <div class="src-item" id="src-music">
@@ -61,11 +75,6 @@
       <div class="src-item" id="src-video" data-pane="pane-video">
         <svg viewBox="0 0 16 16"><rect x="1" y="3" width="14" height="10" rx="1" fill="none" stroke="#5f6b7e"/><path d="M6 6l4 2-4 2z"/></svg>
         Video</div>
-
-      <div class="src-section">View</div>
-      <div class="src-item" id="src-visualizer" data-pane="pane-visualizer">
-        <svg viewBox="0 0 16 16"><path d="M1 9h2l1-6 2 11 2-8 2 5 2-9 2 7h1v2h-3l-1-4-2 8-2-5-2 6-2-5H1z"/></svg>
-        Visualizer</div>
 
       <div class="src-section">Playlists</div>
       <div id="playlist-list"><div class="src-item disabled">Build the library</div></div>
@@ -111,27 +120,6 @@
         <button id="btn-build" disabled>Build / refresh library</button>
         <div class="status" id="build-status"></div>
         <div class="stats" id="lib-stats" style="margin-top:14px;"></div>
-      </div>
-
-      <!-- PLAYBACK VISUALIZER -->
-      <div class="pane" id="pane-visualizer">
-        <div class="browse-head">
-          <div><h2>Visualizer</h2>
-            <p class="lead">A lightweight Wave.js view driven by the current player.</p></div>
-          <div class="browse-actions">
-            <select id="visualizer-style">
-              <option value="bars">Bars</option>
-              <option value="shine">Shine</option>
-              <option value="dualbars">Dual bars</option>
-              <option value="wave">Wave</option>
-            </select>
-            <button id="btn-visualizer">Enable</button>
-          </div>
-        </div>
-        <div class="visualizer-shell visualizer-settings">
-          <div id="visualizer-empty">The visualizer now appears inside the playback display. Start a track and enable it here or with the small tab on the right edge of the display.</div>
-        </div>
-        <div class="muted visualizer-credit">Wave.js · MIT licensed · bundled for offline use</div>
       </div>
 
       <!-- LIBRARY / PLAYLIST BROWSER -->
@@ -257,14 +245,15 @@
         <label class="check"><input type="checkbox" id="transcode" checked>
           Transcode lossless and higher-bitrate files when needed <span class="muted" id="ffmpeg-note"></span></label>
         <div class="bitrate-control">
-          <div class="bitrate-label"><label id="bitrate-format">MP3 bitrate</label><b id="bitrate-value">320 kbps</b></div>
+          <div class="bitrate-label">
+            <label id="bitrate-format">MP3 bitrate</label>
+            <button class="info-btn" id="bitrate-info" type="button" title="Bitrate info">i</button>
+            <b id="bitrate-value">320 kbps</b>
+          </div>
+          <div class="info-popover hidden" id="bitrate-popover">Lower bitrates fit more songs on small devices. iPods use AAC; USB players use MP3. iAmped only transcodes files above the selected preset or lossless files when transcoding is enabled.</div>
           <input id="bitrate-notch" type="range" min="0" max="5" step="1" value="5">
           <div class="bitrate-ticks" id="bitrate-ticks"></div>
         </div>
-        <label class="check"><input type="checkbox" id="sync-artwork" checked>
-          Sync album artwork — embedded tags/cover.jpg for USB, ArtworkDB for supported iPods</label>
-        <label class="check"><input type="checkbox" id="mirror" checked>
-          Mirror this selection — remove stale files previously written by iAmped (other files are preserved)</label>
         <label>Include playlists</label>
         <div class="checklist" id="playlists"><div class="item muted">Build the library to load playlists.</div></div>
         <div style="margin:14px 0 0;">
@@ -296,47 +285,55 @@
           <div class="songbody review-list" id="review-list"></div>
         </div>
 
-        <div class="device-tools">
-          <div>
-            <b>Rollback</b>
-            <select id="backup-select"><option value="">No snapshots yet</option></select>
-            <button id="btn-restore">Restore selected backup</button>
+        <details class="advanced-settings">
+          <summary>Advanced settings</summary>
+          <div class="advanced-body">
+            <label class="check"><input type="checkbox" id="sync-artwork" checked>
+              Sync album artwork</label>
+            <label class="check"><input type="checkbox" id="mirror" checked>
+              Mirror selection and remove stale iAmped files</label>
+            <div class="device-tools">
+              <div>
+                <b>Rollback</b>
+                <select id="backup-select"><option value="">No snapshots yet</option></select>
+                <button id="btn-restore">Restore selected backup</button>
+              </div>
+              <div>
+                <b>Library matching</b>
+                <button id="btn-match">Match files without Plex IDs</button>
+                <span class="muted" id="match-status"></span>
+              </div>
+              <div>
+                <b>Ingest folder</b>
+                <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
+                <button id="btn-save-ingest">Save</button>
+                <div class="muted" id="ingest-dir-hint" style="font-size:11px; margin-top:4px;"></div>
+              </div>
+            </div>
+            <hr style="border:0; border-top:1px solid #e3e3e3; margin:14px 0;">
+            <h2 style="font-size:14px;">Read back from device → Plex</h2>
+            <p class="lead" style="margin-top:0;">Pull plays &amp; ratings the device accrued and feed them into Plex. Ratings only fill blanks. Preview first — nothing is written until you Apply.</p>
+            <div class="radio-row">
+              <label><input type="checkbox" id="rb-plays" checked> Play counts</label>
+              <label><input type="checkbox" id="rb-ratings" checked> Ratings</label>
+              <label><input type="checkbox" id="rb-reset" checked> Reset device after import</label>
+            </div>
+            <div style="margin-top:8px;">
+              <button id="btn-readback">Read from device</button>
+              <button id="btn-readback-apply" class="aqua hidden">Apply to Plex</button>
+              <span id="readback-summary" style="margin-left:10px;"></span>
+            </div>
+            <div class="status" id="readback-status"></div>
+            <div class="songlist hidden" id="readback-wrap" style="margin-top:12px;">
+              <div class="songhead">
+                <div class="c-num"></div><div class="c-name">Track</div>
+                <div class="c-artist">Artist</div><div class="c-plays">+Plays</div>
+                <div class="c-rating">Rating</div>
+              </div>
+              <div class="songbody" id="readback-list"></div>
+            </div>
           </div>
-          <div>
-            <b>Library matching</b>
-            <button id="btn-match">Match files without Plex IDs</button>
-            <span class="muted" id="match-status"></span>
-          </div>
-          <div>
-            <b>Ingest folder</b>
-            <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
-            <button id="btn-save-ingest">Save</button>
-            <div class="muted" id="ingest-dir-hint" style="font-size:11px; margin-top:4px;"></div>
-          </div>
-        </div>
-
-        <hr style="border:0; border-top:1px solid #e3e3e3; margin:18px 0;">
-        <h2 style="font-size:14px;">Read back from device → Plex</h2>
-        <p class="lead" style="margin-top:0;">Pull plays &amp; ratings the device accrued and feed them into Plex. Ratings only fill blanks (an existing Plex rating is never overwritten). Preview first — nothing is written until you Apply.</p>
-        <div class="radio-row">
-          <label><input type="checkbox" id="rb-plays" checked> Play counts</label>
-          <label><input type="checkbox" id="rb-ratings" checked> Ratings</label>
-          <label><input type="checkbox" id="rb-reset" checked> Reset device after import</label>
-        </div>
-        <div style="margin-top:8px;">
-          <button id="btn-readback">Read from device</button>
-          <button id="btn-readback-apply" class="aqua hidden">Apply to Plex</button>
-          <span id="readback-summary" style="margin-left:10px;"></span>
-        </div>
-        <div class="status" id="readback-status"></div>
-        <div class="songlist hidden" id="readback-wrap" style="margin-top:12px;">
-          <div class="songhead">
-            <div class="c-num"></div><div class="c-name">Track</div>
-            <div class="c-artist">Artist</div><div class="c-plays">+Plays</div>
-            <div class="c-rating">Rating</div>
-          </div>
-          <div class="songbody" id="readback-list"></div>
-        </div>
+        </details>
       </div>
 
     </div>
@@ -398,8 +395,17 @@
   </div>
 
 </div>
+<div class="visualizer-fullscreen hidden" id="visualizer-fullscreen" role="dialog" aria-modal="true" aria-label="Full screen visualizer">
+  <canvas id="butterchurn-canvas"></canvas>
+  <div class="visualizer-fullscreen-chrome">
+    <div class="visualizer-fullscreen-title" id="visualizer-fullscreen-title">iAmped</div>
+    <button id="btn-exit-visualizer" title="Exit full screen" aria-label="Exit full screen">×</button>
+  </div>
+</div>
 <audio id="player"></audio>
-<script src="vendor/wave.js"></script>
+<script src="vendor/audiomotion-analyzer.js"></script>
+<script src="vendor/butterchurn.min.js"></script>
+<script src="vendor/butterchurnPresetsMinimal.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -59,6 +59,9 @@ const STATE = {
   currentDevice: null,
   visualizer: null,
   visualizerEnabled: false,
+  visualizerStyle: "bars",
+  visualizerFullscreenEngine: "butterchurn",
+  visualizerFullscreen: false,
   playbackOffset: 0,
   bitrateByFormat: { aac: 256, mp3: 320 },
   manualPlaylistIds: null,
@@ -268,7 +271,13 @@ async function buildLibrary() {
   try {
     const { job } = await api("/api/library/build", "POST", { section: $("section").value });
     pollJob(job, {
-      onProgress: (j) => { s.textContent = j.message || j.phase; lcd("Building library", j.message || j.phase, j.total ? j.done / j.total : 0.4); },
+      onProgress: (j) => {
+        const count = j.total
+          ? `${Number(j.done || 0).toLocaleString()} of ${Number(j.total).toLocaleString()}`
+          : Number(j.done || 0).toLocaleString();
+        s.textContent = j.total ? `${j.message || j.phase} (${count})` : (j.message || j.phase);
+        lcd("Building library", j.total ? count : (j.message || j.phase), j.total ? j.done / j.total : null);
+      },
       onDone: async (j) => { s.className = "status ok"; s.textContent = j.message; lcd("iAmped", j.message); $("btn-build").disabled = false; await refreshStats(); await loadSidebar(); openLibrary(); },
       onError: (e) => { s.className = "status err"; s.textContent = e; lcd("iAmped", "Build failed"); $("btn-build").disabled = false; },
     });
@@ -1031,6 +1040,7 @@ function playIndex(i) {
   player.src = streamUrl(t);
   player.play().catch(() => {});
   lcd(t.title, `${t.artist} — ${t.album}`);
+  updateFullscreenTitle();
   $("lcd-prog").classList.add("seekable");
   updatePlaybackDisplay(0);
   setPlayIcon(true); renderTracks();
@@ -1257,12 +1267,12 @@ async function selectDevice(el) {
 
 function openDeviceInspector() {
   $("pane-device").classList.add("open");
-  $("view-inspector").classList.add("active");
+  updateVisualizerMenuState();
   bottomDevice();
 }
 function closeDeviceInspector() {
   $("pane-device").classList.remove("open");
-  $("view-inspector").classList.remove("active");
+  updateVisualizerMenuState();
   if (document.querySelector(".content > #pane-browse.active")) bottomBrowse();
 }
 function toggleDeviceType() {
@@ -1661,15 +1671,78 @@ $("ingest-cancel").onclick = closeIngest;
 $("ingest-confirm").onclick = confirmIngest;
 $("src-music").onclick = openLibrary;
 $("btn-close-inspector").onclick = closeDeviceInspector;
-$("view-inspector").onclick = () => {
-  if ($("pane-device").classList.contains("open")) closeDeviceInspector();
-  else if (STATE.currentDevice) openDeviceInspector();
+$("bitrate-info").onclick = (e) => {
+  e.stopPropagation();
+  $("bitrate-popover").classList.toggle("hidden");
 };
-$("view-list").onclick = () => {
-  $("view-list").classList.add("active");
-  openLibrary();
-};
-$("view-visualizer").onclick = () => toggleVisualizer();
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#bitrate-info") && !e.target.closest("#bitrate-popover")) {
+    $("bitrate-popover").classList.add("hidden");
+  }
+});
+
+function closeAppMenus() {
+  document.querySelectorAll(".app-menu-panel").forEach((el) => el.classList.add("hidden"));
+  document.querySelectorAll(".app-menu-button").forEach((el) => el.classList.remove("active"));
+}
+function toggleAppMenu(name) {
+  const panel = $(`${name}-menu-panel`);
+  const button = $(`${name}-menu-button`);
+  const open = panel.classList.contains("hidden");
+  closeAppMenus();
+  if (open) {
+    panel.classList.remove("hidden");
+    button.classList.add("active");
+    updateVisualizerMenuState();
+  }
+}
+function updateVisualizerMenuState() {
+  const checks = {
+    "menu-check-mini": STATE.visualizerEnabled,
+    "menu-check-bars": STATE.visualizerStyle === "bars",
+    "menu-check-spectrum": STATE.visualizerStyle === "spectrum",
+    "menu-check-led": STATE.visualizerStyle === "led",
+    "menu-check-butterchurn": STATE.visualizerFullscreenEngine === "butterchurn",
+  };
+  Object.entries(checks).forEach(([id, on]) => $(id)?.classList.toggle("on", !!on));
+  $("visualizer-dot")?.classList.toggle("active", STATE.visualizerEnabled);
+}
+function handleAppMenuAction(action) {
+  if (action === "server") selectPane("pane-plex", document.querySelector('[data-pane="pane-plex"]'));
+  else if (action === "music") openLibrary();
+  else if (action === "toggle-visualizer") toggleVisualizer();
+  else if (action === "fullscreen-visualizer") openFullscreenVisualizer();
+  else if (action === "viz-bars") setAudioMotionStyle("bars", true);
+  else if (action === "viz-spectrum") setAudioMotionStyle("spectrum", true);
+  else if (action === "viz-led") setAudioMotionStyle("led", true);
+  else if (action === "viz-butterchurn") {
+    STATE.visualizerFullscreenEngine = "butterchurn";
+    openFullscreenVisualizer();
+  } else if (action === "inspector" && STATE.currentDevice) openDeviceInspector();
+  updateVisualizerMenuState();
+}
+document.querySelectorAll(".app-menu-button").forEach((button) => {
+  button.onclick = (e) => { e.stopPropagation(); toggleAppMenu(button.dataset.menu); };
+});
+document.querySelectorAll(".app-menu-row").forEach((row) => {
+  row.onclick = (e) => {
+    e.stopPropagation();
+    const action = row.dataset.action;
+    closeAppMenus();
+    handleAppMenuAction(action);
+  };
+});
+$("visualizer-dot").onclick = (e) => { e.stopPropagation(); toggleVisualizer(); };
+$("btn-exit-visualizer").onclick = closeFullscreenVisualizer;
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".app-menubar")) closeAppMenus();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeAppMenus();
+    if (STATE.visualizerFullscreen) closeFullscreenVisualizer();
+  }
+});
 
 // ---------------------------------------------------------------- video sync
 const VIDEO = { loaded: false, sections: [], kind: "movie",
@@ -1854,71 +1927,202 @@ async function syncVideo() {
 $("btn-video-sync").onclick = syncVideo;
 
 // ---------------------------------------------------------------- visualizer
-function resizeVisualizer() {
-  const canvas = $("visualizer-canvas");
-  if (!$("lcd").classList.contains("visualizer-on")) return;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(rect.width * devicePixelRatio));
-  canvas.height = Math.max(1, Math.round(rect.height * devicePixelRatio));
-}
-function visualizerAnimation(wave) {
-  const common = { lineColor: "#78b7ff", fillColor: "#4f8fe0" };
-  const style = $("visualizer-style").value;
-  if (style === "shine") return new wave.animations.Shine({ lineColor: "#b9dcff" });
-  if (style === "dualbars") return new wave.animations.Cubes({ ...common, count: 32 });
-  if (style === "wave") return new wave.animations.Wave({ lineColor: "#80c4ff", lineWidth: 3 });
-  return new wave.animations.Lines({ ...common, count: 64, lineWidth: 3 });
-}
-function ensureVisualizerAnalyser() {
-  const viz = STATE.visualizer;
-  if (!viz) return;
-  if (!viz._interacted && !player.paused) {
-    try { viz.connectAnalyser(); } catch (_) {}
+function visualizerState() {
+  if (!STATE.visualizer) {
+    STATE.visualizer = {
+      audioMotion: null,
+      audioCtx: null,
+      sourceNode: null,
+      butterchurn: null,
+      butterchurnConnected: false,
+      butterchurnRaf: null,
+      butterchurnPresetNames: [],
+      nativeFullscreen: false,
+    };
   }
-  if (viz._audioContext?.state === "suspended") viz._audioContext.resume().catch(() => {});
+  return STATE.visualizer;
+}
+function audioMotionOptionsForStyle(style) {
+  const common = {
+    bgAlpha: .16,
+    connectSpeakers: true,
+    fftSize: 2048,
+    frequencyScale: "log",
+    gradient: "steelblue",
+    height: 52,
+    loRes: true,
+    maxFreq: 16000,
+    minFreq: 30,
+    overlay: true,
+    reflexRatio: 0,
+    showBgColor: true,
+    showPeaks: false,
+    showScaleX: false,
+    showScaleY: false,
+    smoothing: .72,
+  };
+  if (style === "spectrum") {
+    return { ...common, alphaBars: false, fillAlpha: .45, ledBars: false, lineWidth: 1.5, mode: 10 };
+  }
+  if (style === "led") {
+    return { ...common, colorMode: "bar-level", gradient: "prism", ledBars: true, mode: 4, trueLeds: true };
+  }
+  return { ...common, colorMode: "gradient", ledBars: false, mode: 4, roundBars: true };
+}
+function configureAudioMotion() {
+  const viz = visualizerState();
+  if (!viz.audioMotion) return;
+  viz.audioMotion.setOptions(audioMotionOptionsForStyle(STATE.visualizerStyle));
+}
+function ensureVisualizerAudio() {
+  const viz = visualizerState();
+  if (!window.AudioMotionAnalyzer) {
+    lcd("Visualizer unavailable", "audioMotion could not be loaded");
+    return false;
+  }
+  try {
+    if (!viz.audioMotion) {
+      viz.audioMotion = new window.AudioMotionAnalyzer($("visualizer-inline"), {
+        ...audioMotionOptionsForStyle(STATE.visualizerStyle),
+        source: player,
+        start: false,
+      });
+      viz.audioCtx = viz.audioMotion.audioCtx;
+      viz.sourceNode = viz.audioMotion.connectedSources?.[0] || null;
+    }
+    configureAudioMotion();
+    if (viz.audioCtx?.state === "suspended") viz.audioCtx.resume().catch(() => {});
+    return true;
+  } catch (e) {
+    lcd("Visualizer failed", e.message || "Could not start audio analyzer");
+    return false;
+  }
+}
+function setAudioMotionStyle(style, showInline = false) {
+  STATE.visualizerStyle = style;
+  configureAudioMotion();
+  if (showInline) enableVisualizer();
+  updateVisualizerMenuState();
 }
 function enableVisualizer() {
-  if (!window.Wave) { lcd("Visualizer unavailable", "Wave.js did not load"); return; }
+  if (!ensureVisualizerAudio()) return;
   STATE.visualizerEnabled = true;
   $("lcd").classList.add("visualizer-on");
-  $("view-visualizer").classList.add("active");
-  $("lcd-viz-toggle").textContent = "▸";
-  $("lcd-viz-toggle").title = "Hide visualizer";
-  $("lcd-viz-toggle").setAttribute("aria-pressed", "true");
-  $("visualizer-empty").textContent = "Visualizer enabled in the playback display.";
-  $("btn-visualizer").textContent = "Disable";
-  resizeVisualizer();
-  if (!STATE.visualizer) STATE.visualizer = new Wave(player, $("visualizer-canvas"));
-  STATE.visualizer.clearAnimations();
-  STATE.visualizer.addAnimation(visualizerAnimation(STATE.visualizer));
-  ensureVisualizerAnalyser();
-  requestAnimationFrame(() => {
-    resizeVisualizer();
-  });
+  $("visualizer-dot").classList.add("active");
+  $("visualizer-dot").title = "Hide visualizer";
+  STATE.visualizer.audioMotion.toggleAnalyzer(true);
+  requestAnimationFrame(() => STATE.visualizer?.audioMotion?.setOptions({ height: $("visualizer-inline").clientHeight || 52 }));
+  updateVisualizerMenuState();
 }
 function disableVisualizer() {
-  if (STATE.visualizer) STATE.visualizer.clearAnimations();
   STATE.visualizerEnabled = false;
   $("lcd").classList.remove("visualizer-on");
-  $("view-visualizer").classList.remove("active");
-  $("lcd-viz-toggle").textContent = "◂";
-  $("lcd-viz-toggle").title = "Show visualizer";
-  $("lcd-viz-toggle").setAttribute("aria-pressed", "false");
-  $("visualizer-empty").textContent = "The visualizer is off. Enable it here or with the small tab on the playback display.";
-  $("btn-visualizer").textContent = "Enable";
+  $("visualizer-dot").classList.remove("active");
+  $("visualizer-dot").title = "Show visualizer";
+  STATE.visualizer?.audioMotion?.toggleAnalyzer(false);
+  updateVisualizerMenuState();
 }
 function toggleVisualizer() {
   if (STATE.visualizerEnabled) disableVisualizer();
   else enableVisualizer();
 }
-$("btn-visualizer").onclick = toggleVisualizer;
-$("lcd-viz-toggle").onclick = toggleVisualizer;
-$("visualizer-style").onchange = () => { if (STATE.visualizerEnabled) enableVisualizer(); };
+function updateFullscreenTitle() {
+  const t = STATE.tracks[STATE.playing];
+  $("visualizer-fullscreen-title").textContent = t ? `${t.title} — ${t.artist || "Unknown artist"}` : "iAmped";
+}
+function butterchurnPresetMap() {
+  const pack = window.butterchurnPresetsMinimal?.getPresets
+    ? window.butterchurnPresetsMinimal
+    : window.butterchurnPresetsMinimal?.default || window.butterchurnPresetsMinimal;
+  if (!pack) return {};
+  return typeof pack.getPresets === "function" ? pack.getPresets() : pack;
+}
+function butterchurnApi() {
+  if (window.butterchurn?.createVisualizer) return window.butterchurn;
+  if (window.butterchurn?.default?.createVisualizer) return window.butterchurn.default;
+  return null;
+}
+function ensureButterchurn() {
+  const api = butterchurnApi();
+  if (!ensureVisualizerAudio() || !api) return false;
+  const viz = visualizerState();
+  const canvas = $("butterchurn-canvas");
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(640, Math.round((rect.width || window.innerWidth) * devicePixelRatio));
+  const height = Math.max(360, Math.round((rect.height || window.innerHeight) * devicePixelRatio));
+  if (!viz.butterchurn) {
+    viz.butterchurn = api.createVisualizer(viz.audioCtx, canvas, {
+      height,
+      meshHeight: 48,
+      meshWidth: 64,
+      pixelRatio: devicePixelRatio,
+      textureRatio: 1,
+      width,
+    });
+    const presets = butterchurnPresetMap();
+    viz.butterchurnPresetNames = Object.keys(presets);
+    if (viz.butterchurnPresetNames.length) {
+      const idx = Math.floor(Math.random() * viz.butterchurnPresetNames.length);
+      viz.butterchurn.loadPreset(presets[viz.butterchurnPresetNames[idx]], 0);
+    }
+  }
+  if (!viz.butterchurnConnected && viz.sourceNode) {
+    viz.butterchurn.connectAudio(viz.sourceNode);
+    viz.butterchurnConnected = true;
+  }
+  viz.butterchurn.setRendererSize(width, height);
+  return true;
+}
+function renderButterchurn() {
+  const viz = visualizerState();
+  if (!STATE.visualizerFullscreen || !viz.butterchurn) return;
+  ensureButterchurn();
+  viz.butterchurn.render();
+  viz.butterchurnRaf = requestAnimationFrame(renderButterchurn);
+}
+async function openFullscreenVisualizer() {
+  if (!ensureButterchurn()) {
+    lcd("Visualizer unavailable", "Butterchurn could not be loaded");
+    return;
+  }
+  STATE.visualizerFullscreen = true;
+  updateFullscreenTitle();
+  $("visualizer-fullscreen").classList.remove("hidden");
+  const viz = visualizerState();
+  if (viz.butterchurnRaf) cancelAnimationFrame(viz.butterchurnRaf);
+  renderButterchurn();
+  try {
+    await $("visualizer-fullscreen").requestFullscreen?.();
+    viz.nativeFullscreen = !!document.fullscreenElement;
+  } catch (_) {
+    viz.nativeFullscreen = false;
+  }
+  updateVisualizerMenuState();
+}
+function closeFullscreenVisualizer() {
+  const viz = visualizerState();
+  STATE.visualizerFullscreen = false;
+  $("visualizer-fullscreen").classList.add("hidden");
+  if (viz.butterchurnRaf) cancelAnimationFrame(viz.butterchurnRaf);
+  viz.butterchurnRaf = null;
+  if (document.fullscreenElement && viz.nativeFullscreen) document.exitFullscreen().catch(() => {});
+  viz.nativeFullscreen = false;
+  updateVisualizerMenuState();
+}
 player.addEventListener("play", () => {
-  if (STATE.visualizerEnabled) ensureVisualizerAnalyser();
+  if (STATE.visualizerEnabled || STATE.visualizerFullscreen) ensureVisualizerAudio();
 });
+player.addEventListener("loadedmetadata", updateFullscreenTitle);
 $("volume").oninput = () => { player.volume = Number($("volume").value); };
-window.addEventListener("resize", resizeVisualizer);
+window.addEventListener("resize", () => {
+  if (STATE.visualizer?.audioMotion && STATE.visualizerEnabled) configureAudioMotion();
+  if (STATE.visualizerFullscreen) ensureButterchurn();
+});
+document.addEventListener("fullscreenchange", () => {
+  if (STATE.visualizer?.nativeFullscreen && !document.fullscreenElement && STATE.visualizerFullscreen) {
+    closeFullscreenVisualizer();
+  }
+});
 
 // The device surface is a persistent optional inspector, not a replacement
 // page. Move it beside the main content at runtime to keep existing form IDs
