@@ -61,8 +61,7 @@ the device can be safely ejected from the same screen.
   informational and never make foreign files eligible for automatic removal.
 - Device readback summarizes foreign/unmatched entries instead of flooding the
   review with one warning per track.
-- The View → Visualizer screen uses the MIT-licensed Wave.js library, bundled
-  locally so it works offline.
+- The View menu includes an audioMotion status visualizer and a Butterchurn full-screen visualizer, both vendored under `iamped/web/vendor/`.
 
 ## Device support
 
