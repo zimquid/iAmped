@@ -66,6 +66,13 @@ const STATE = {
   playbackOffset: 0,
   playbackRecoveryKey: null,
   playbackRecoveryCount: 0,
+  nativePlaybackAvailable: false,
+  nativePlaybackActive: false,
+  nativePlaybackPaused: true,
+  nativePlaybackPosition: 0,
+  nativePlaybackDuration: 0,
+  nativePlaybackTimer: null,
+  nativePlaybackLastPosition: 0,
   bitrateByFormat: { aac: 256, mp3: 320 },
   manualPlaylistIds: null,
   transferMaxTracks: null,
@@ -158,6 +165,7 @@ async function loadConfig() {
   $("transcode").checked = cfg.transcode_lossless !== false;
   STATE.bitrateByFormat.aac = Number(cfg.aac_bitrate_k) || 256;
   STATE.bitrateByFormat.mp3 = Number(cfg.mp3_bitrate_k) || 320;
+  STATE.nativePlaybackAvailable = !!cfg.native_playback?.available;
   $("mirror").checked = cfg.mirror !== false;
   if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
@@ -1023,9 +1031,13 @@ function currentTrack() {
 function trackDuration() {
   const metadataDuration = Number(currentTrack()?.duration_ms || 0) / 1000;
   if (metadataDuration > 0) return metadataDuration;
+  if (STATE.nativePlaybackActive && STATE.nativePlaybackDuration > 0) return STATE.nativePlaybackDuration;
   return Number.isFinite(player.duration) && player.duration > 0 ? player.duration : 0;
 }
 function playbackPosition() {
+  if (STATE.nativePlaybackActive) {
+    return Math.min(trackDuration() || Infinity, STATE.nativePlaybackPosition || 0);
+  }
   return Math.min(trackDuration() || Infinity, STATE.playbackOffset + (player.currentTime || 0));
 }
 function updatePlaybackDisplay(position = playbackPosition()) {
@@ -1036,15 +1048,90 @@ function streamUrl(t, start = 0) {
   const base = `/api/stream/${encodeURIComponent(t.rating_key)}`;
   return start > 0 ? `${base}?start=${encodeURIComponent(start.toFixed(3))}` : base;
 }
-function playIndex(i) {
+function isPlaybackPaused() {
+  return STATE.nativePlaybackActive ? STATE.nativePlaybackPaused : player.paused;
+}
+function stopNativePlaybackTimer() {
+  if (STATE.nativePlaybackTimer) clearInterval(STATE.nativePlaybackTimer);
+  STATE.nativePlaybackTimer = null;
+}
+async function pollNativePlayback() {
+  if (!STATE.nativePlaybackActive) return;
+  try {
+    const status = await api("/api/playback/status");
+    if (!status.available) {
+      STATE.nativePlaybackAvailable = false;
+      STATE.nativePlaybackActive = false;
+      stopNativePlaybackTimer();
+      setPlayIcon(false);
+      return;
+    }
+    STATE.nativePlaybackPaused = status.state !== "playing";
+    STATE.nativePlaybackPosition = Number(status.position || 0);
+    STATE.nativePlaybackDuration = Number(status.duration || 0) || trackDuration();
+    STATE.nativePlaybackLastPosition = Math.max(STATE.nativePlaybackLastPosition, STATE.nativePlaybackPosition);
+    updatePlaybackDisplay();
+    setPlayIcon(!STATE.nativePlaybackPaused);
+    if (status.state === "stopped") {
+      const duration = trackDuration();
+      const finished = duration > 0 && duration - STATE.nativePlaybackLastPosition <= 5;
+      STATE.nativePlaybackActive = false;
+      stopNativePlaybackTimer();
+      if (finished) playIndex(STATE.playing + 1);
+      else setPlayIcon(false);
+    }
+  } catch (_) {}
+}
+function startNativePlaybackTimer() {
+  stopNativePlaybackTimer();
+  STATE.nativePlaybackTimer = setInterval(pollNativePlayback, 500);
+  pollNativePlayback();
+}
+async function stopNativePlayback() {
+  if (!STATE.nativePlaybackActive) return;
+  STATE.nativePlaybackActive = false;
+  stopNativePlaybackTimer();
+  try { await api("/api/playback/stop", "POST", {}); } catch (_) {}
+}
+async function startNativePlayback(t, start = 0) {
+  try {
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+    const status = await api("/api/playback/play", "POST", { rating_key: t.rating_key, start });
+    STATE.nativePlaybackActive = true;
+    STATE.nativePlaybackPaused = false;
+    STATE.nativePlaybackPosition = start;
+    STATE.nativePlaybackDuration = Number(status.duration || 0) || trackDuration();
+    STATE.nativePlaybackLastPosition = start;
+    startNativePlaybackTimer();
+    return true;
+  } catch (e) {
+    STATE.nativePlaybackAvailable = false;
+    STATE.nativePlaybackActive = false;
+    stopNativePlaybackTimer();
+    lcd("Native playback unavailable", "Falling back to browser playback");
+    return false;
+  }
+}
+async function playIndex(i) {
   if (i < 0 || i >= STATE.tracks.length) return;
   STATE.playing = i;
   const t = STATE.tracks[i];
   STATE.playbackOffset = 0;
   STATE.playbackRecoveryKey = t.rating_key;
   STATE.playbackRecoveryCount = 0;
-  player.src = streamUrl(t);
-  player.play().then(syncVisualizerToPlayback).catch(() => {});
+  if (STATE.nativePlaybackAvailable) {
+    const nativeStarted = await startNativePlayback(t);
+    if (!nativeStarted) {
+      player.src = streamUrl(t);
+      player.play().then(syncVisualizerToPlayback).catch(() => {});
+    }
+  } else {
+    await stopNativePlayback();
+    player.src = streamUrl(t);
+    player.play().then(syncVisualizerToPlayback).catch(() => {});
+  }
   lcd(t.title, `${t.artist} — ${t.album}`);
   updateFullscreenTitle();
   prepareVisualizerTrack();
@@ -1052,8 +1139,16 @@ function playIndex(i) {
   updatePlaybackDisplay(0);
   setPlayIcon(true); renderTracks();
 }
-function togglePlay() {
+async function togglePlay() {
   if (STATE.playing < 0) { if (STATE.tracks.length) playIndex(0); return; }
+  if (STATE.nativePlaybackActive) {
+    if (STATE.nativePlaybackPaused) {
+      try { await api("/api/playback/resume", "POST", {}); STATE.nativePlaybackPaused = false; syncVisualizerToPlayback(); setPlayIcon(true); } catch (_) {}
+    } else {
+      try { await api("/api/playback/pause", "POST", {}); STATE.nativePlaybackPaused = true; disconnectVisualizerSource(); setPlayIcon(false); } catch (_) {}
+    }
+    return;
+  }
   if (player.paused) { player.play().then(syncVisualizerToPlayback).catch(() => {}); setPlayIcon(true); } else { player.pause(); setPlayIcon(false); }
 }
 function setPlayIcon(playing) {
@@ -1117,6 +1212,17 @@ function seekFromEvent(clientX) {
 
 function commitSeek(target) {
   if (target == null) return;
+  if (STATE.nativePlaybackActive) {
+    STATE.nativePlaybackPosition = target;
+    STATE.nativePlaybackLastPosition = target;
+    updatePlaybackDisplay(target);
+    api("/api/playback/seek", "POST", { position: target }).then((status) => {
+      STATE.nativePlaybackPosition = Number(status.position || target);
+      STATE.nativePlaybackDuration = Number(status.duration || 0) || trackDuration();
+      syncVisualizerToPlayback();
+    }).catch(() => {});
+    return;
+  }
   // Range-capable/native streams can seek in place. A live ffmpeg stream has
   // an infinite/unknown media duration, so restart it at the requested offset.
   if (Number.isFinite(player.duration) && player.duration > 0) {
@@ -2163,7 +2269,7 @@ function startVisualizerSource() {
   source.onended = () => {
     if (viz.sourceNode !== source) return;
     disconnectVisualizerSource();
-    if ((STATE.visualizerEnabled || STATE.visualizerFullscreen) && !player.paused) {
+    if ((STATE.visualizerEnabled || STATE.visualizerFullscreen) && !isPlaybackPaused()) {
       viz.buffer = null;
       prepareVisualizerTrack().then(syncVisualizerToPlayback);
     }
@@ -2172,7 +2278,7 @@ function startVisualizerSource() {
 }
 function syncVisualizerToPlayback() {
   const active = STATE.visualizerEnabled || STATE.visualizerFullscreen;
-  if (!active || player.paused) {
+  if (!active || isPlaybackPaused()) {
     disconnectVisualizerSource();
     return;
   }
@@ -2336,7 +2442,11 @@ player.addEventListener("seeked", () => {
   if (STATE.visualizerEnabled || STATE.visualizerFullscreen) syncVisualizerToPlayback();
 });
 player.addEventListener("loadedmetadata", updateFullscreenTitle);
-$("volume").oninput = () => { player.volume = Number($("volume").value); };
+$("volume").oninput = () => {
+  const volume = Number($("volume").value);
+  player.volume = volume;
+  if (STATE.nativePlaybackActive) api("/api/playback/volume", "POST", { volume }).catch(() => {});
+};
 window.addEventListener("resize", () => {
   if (STATE.visualizer?.audioMotion && STATE.visualizerEnabled) configureAudioMotion();
   if (STATE.visualizerFullscreen) ensureButterchurn();
