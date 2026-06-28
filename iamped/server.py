@@ -10,7 +10,7 @@ import traceback
 import uuid
 import webbrowser
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 from . import (artwork, config, device_management, filler, ingest, inventory,
                matcher, plex_client, readback)
@@ -1196,6 +1196,15 @@ def _audio_stream_headers(resp: Response) -> Response:
     return resp
 
 
+def _cached_playback_response(server, lib: Library, track: dict) -> Response | None:
+    path, ext = materialize(server, lib, track, True, "mp3", 192)
+    if ext != ".mp3" or not os.path.exists(path) or os.path.getsize(path) <= 0:
+        return None
+    resp = send_file(path, mimetype="audio/mpeg", conditional=True)
+    resp.headers["Accept-Ranges"] = "bytes"
+    return _audio_stream_headers(resp)
+
+
 @app.get("/api/stream/<rk>")
 def api_stream(rk):
     lib = _lib()
@@ -1216,6 +1225,11 @@ def api_stream(rk):
         duration = max(0.0, min(120.0, float(request.args.get("duration", "0") or 0)))
     except ValueError:
         return jsonify({"error": "invalid duration"}), 400
+
+    if not native and not start and not duration and have_ffmpeg():
+        cached = _cached_playback_response(server, lib, tr)
+        if cached is not None:
+            return cached
 
     if (native and not start and not duration) or not have_ffmpeg():
         # proxy the original, forwarding Range so the browser can seek
