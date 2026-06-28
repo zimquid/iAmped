@@ -21,6 +21,7 @@ const BITRATE_PRESETS = {
   aac: [64, 96, 128, 160, 192, 256],
   mp3: [96, 128, 160, 192, 256, 320],
 };
+const MAX_PLAYBACK_RECOVERIES = 8;
 
 async function api(path, method = "GET", body = null) {
   const opt = { method, headers: { "Content-Type": "application/json" } };
@@ -63,6 +64,8 @@ const STATE = {
   visualizerFullscreenEngine: "butterchurn",
   visualizerFullscreen: false,
   playbackOffset: 0,
+  playbackRecoveryKey: null,
+  playbackRecoveryCount: 0,
   bitrateByFormat: { aac: 256, mp3: 320 },
   manualPlaylistIds: null,
   transferMaxTracks: null,
@@ -1038,6 +1041,8 @@ function playIndex(i) {
   STATE.playing = i;
   const t = STATE.tracks[i];
   STATE.playbackOffset = 0;
+  STATE.playbackRecoveryKey = t.rating_key;
+  STATE.playbackRecoveryCount = 0;
   player.src = streamUrl(t);
   player.play().then(syncVisualizerToPlayback).catch(() => {});
   lcd(t.title, `${t.artist} — ${t.album}`);
@@ -1059,7 +1064,42 @@ function setPlayIcon(playing) {
 player.ontimeupdate = () => { if (!scrubbing) updatePlaybackDisplay(); };
 player.onloadedmetadata = () => updatePlaybackDisplay();
 player.ondurationchange = () => updatePlaybackDisplay();
-player.onended = () => playIndex(STATE.playing + 1);
+function resumeCurrentTrackFrom(position) {
+  const t = currentTrack();
+  if (!t) return;
+  STATE.playbackOffset = Math.max(0, position);
+  player.src = streamUrl(t, STATE.playbackOffset);
+  updatePlaybackDisplay(STATE.playbackOffset);
+  prepareVisualizerTrack();
+  player.play().then(syncVisualizerToPlayback).catch(() => {});
+}
+function recoverPlaybackIfEarlyEnd() {
+  const t = currentTrack();
+  const position = playbackPosition();
+  const duration = trackDuration();
+  const endedEarly = t && duration > 0 && position > 8 && duration - position > 8;
+  if (endedEarly) {
+    if (STATE.playbackRecoveryKey !== t.rating_key) {
+      STATE.playbackRecoveryKey = t.rating_key;
+      STATE.playbackRecoveryCount = 0;
+    }
+    if (STATE.playbackRecoveryCount < MAX_PLAYBACK_RECOVERIES) {
+      STATE.playbackRecoveryCount += 1;
+      resumeCurrentTrackFrom(position);
+      return true;
+    }
+  }
+  return false;
+}
+function handlePlaybackEnded() {
+  if (recoverPlaybackIfEarlyEnd()) return;
+  STATE.playbackRecoveryCount = 0;
+  playIndex(STATE.playing + 1);
+}
+player.onended = handlePlaybackEnded;
+player.onerror = () => {
+  if (!recoverPlaybackIfEarlyEnd()) setPlayIcon(false);
+};
 
 // ---- scrubbing: the LCD progress bar doubles as an iTunes-style seek bar ----
 const prog = $("lcd-prog");
@@ -1090,8 +1130,10 @@ function commitSeek(target) {
   if (!t) return;
   const wasPlaying = !player.paused;
   STATE.playbackOffset = target;
+  STATE.playbackRecoveryKey = t.rating_key;
+  STATE.playbackRecoveryCount = 0;
   player.src = streamUrl(t, target);
-  if (wasPlaying) player.play().catch(() => {});
+  if (wasPlaying) player.play().then(syncVisualizerToPlayback).catch(() => {});
 }
 prog.addEventListener("mousedown", (e) => {
   if (STATE.playing < 0 || !trackDuration()) return;

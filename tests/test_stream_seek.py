@@ -56,6 +56,8 @@ class StreamSeekTest(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertEqual(command[command.index("-ss") + 1], "61.250")
         self.assertLess(command.index("-ss"), command.index("-i"))
+        self.assertEqual(command[command.index("-reconnect") + 1], "1")
+        self.assertLess(command.index("-reconnect"), command.index("-i"))
         self.assertTrue(process.killed)
 
     def test_visualizer_window_limits_transcode_duration(self):
