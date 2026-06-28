@@ -926,6 +926,21 @@ def api_playback_volume():
         return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
 
 
+@app.get("/api/artwork")
+def api_artwork():
+    key = request.args.get("key", "")
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    try:
+        server = get_server()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    url = server.url(key, includeToken=True)
+    r = server._session.get(url, timeout=15)
+    return Response(r.content, status=r.status_code,
+                    content_type=r.headers.get("Content-Type", "image/jpeg"))
+
+
 @app.post("/api/connect")
 def api_connect():
     data = request.json or {}
@@ -1073,10 +1088,17 @@ def _track_view(t: dict) -> dict:
         "rating_key": t["rating_key"], "title": t.get("title"),
         "artist": t.get("artist"), "album": t.get("album"),
         "plays": t.get("view_count") or 0, "rating": t.get("user_rating"),
+        "genre": t.get("genre"), "year": t.get("year"),
+        "album_thumb": t.get("album_thumb"),
         "duration_ms": t.get("duration_ms") or 0,
         "size": t.get("file_size") or 0, "container": t.get("container"),
         "lossless": filler.is_lossless(t),
     }
+
+
+@app.get("/api/library/facets")
+def api_library_facets():
+    return jsonify(_lib().facets())
 
 
 @app.get("/api/tracks")
@@ -1084,7 +1106,9 @@ def api_tracks():
     a = request.args
     res = _lib().browse_tracks(
         search=a.get("search", ""), sort=a.get("sort", "artist"),
-        offset=int(a.get("offset", 0)), limit=int(a.get("limit", 200)))
+        offset=int(a.get("offset", 0)), limit=int(a.get("limit", 200)),
+        artist=a.get("artist", ""), album=a.get("album", ""),
+        genre=a.get("genre", ""), album_artist=a.get("album_artist", ""))
     return jsonify({"total": res["total"],
                     "tracks": [_track_view(t) for t in res["tracks"]]})
 
@@ -1096,6 +1120,30 @@ def api_playlist_tracks(pid):
     rows = lib.get_tracks(keys)
     tracks = [_track_view(rows[rk]) for rk in keys if rk in rows]
     return jsonify({"total": len(tracks), "tracks": tracks})
+
+
+@app.post("/api/track/<rk>/rating")
+def api_track_rating(rk):
+    d = request.json or {}
+    try:
+        rating = max(0.0, min(10.0, float(d.get("rating") or 0)))
+        server = get_server()
+        plex_client.set_rating(server, rk, rating)
+        _lib().set_local_rating(rk, rating)
+        return jsonify({"ok": True, "rating": rating})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/track/<rk>/scrobble")
+def api_track_scrobble(rk):
+    try:
+        server = get_server()
+        plex_client.scrobble(server, rk)
+        _lib().add_local_plays(rk, 1, int(time.time()))
+        return jsonify({"ok": True})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.post("/api/playlist/sonic")
@@ -1275,6 +1323,8 @@ def api_stream(rk):
     tr = lib.get_tracks([rk]).get(rk)
     if not tr:
         return jsonify({"error": "unknown track"}), 404
+    # TODO: Support offline playback from cached audio before requiring a live
+    # Plex connection. The sync cache already tracks cached_path/cached_size.
     try:
         server = get_server()
     except Exception as exc:  # noqa: BLE001
