@@ -33,6 +33,8 @@
       <div class="tbtn" id="t-prev"><svg viewBox="0 0 16 16"><path d="M5 3v10L1 8zM6 8l8-5v10z"/></svg></div>
       <div class="tbtn" id="t-play"><svg viewBox="0 0 16 16"><path d="M3 2l11 6L3 14z"/></svg></div>
       <div class="tbtn" id="t-next"><svg viewBox="0 0 16 16"><path d="M11 3v10l4-5zM10 8L2 3v10z"/></svg></div>
+      <div class="tbtn mode" id="t-shuffle" title="Shuffle"><svg viewBox="0 0 16 16"><path d="M2 4h2.5c1.4 0 2.5 1.1 3.5 2.6C9.1 4.9 10.4 4 12 4h1.3L11.8 2.5 13 1.3 16 4l-3 2.7-1.2-1.2L13.3 4H12c-1.1 0-2 .8-3 2.6l-.5.8-.5-.8C7 4.8 6 4 4.5 4H2zM2 12h2.5c1.5 0 2.5-.8 3.5-2.6l.5-.8.5.8c1 1.8 1.9 2.6 3 2.6h1.3l-1.5-1.5L13 9.3l3 2.7-3 2.7-1.2-1.2 1.5-1.5H12c-1.6 0-2.9-.9-4-2.6C7 10.9 5.9 12 4.5 12z"/></svg></div>
+      <div class="tbtn mode" id="t-repeat" title="Repeat"><svg viewBox="0 0 16 16"><path d="M4 4h7.2L9.8 2.6 11 1.4 14.4 4.8 11 8.2 9.8 7l1.4-1.4H4c-1 0-1.8.8-1.8 1.8v.5H.6v-.5C.6 5.5 2.1 4 4 4zm8 8H4.8l1.4 1.4L5 14.6 1.6 11.2 5 7.8 6.2 9 4.8 10.4H12c1 0 1.8-.8 1.8-1.8v-.5h1.6v.5c0 1.9-1.5 3.4-3.4 3.4z"/></svg><span id="repeat-one" class="repeat-one hidden">1</span></div>
     </div>
     <div class="volume-control" title="Volume">
       <svg viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2zM11 6c1 1 1 3 0 4M13 4c2 2 2 6 0 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
@@ -72,6 +74,9 @@
       <div class="src-item" id="src-music">
         <svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>
         Music</div>
+      <div class="src-item subsrc" id="src-artists">Artists</div>
+      <div class="src-item subsrc" id="src-albums">Albums</div>
+      <div class="src-item subsrc" id="src-genres">Genres</div>
       <div class="src-item" id="src-video" data-pane="pane-video">
         <svg viewBox="0 0 16 16"><rect x="1" y="3" width="14" height="10" rx="1" fill="none" stroke="#5f6b7e"/><path d="M6 6l4 2-4 2z"/></svg>
         Video</div>
@@ -126,12 +131,16 @@
       <div class="pane" id="pane-browse">
         <div class="browse-head">
           <h2 id="browse-title">Music</h2>
+          <div class="view-toggle hidden" id="view-toggle" role="group" aria-label="View mode">
+            <button data-vm="list" title="List view" aria-label="List view"><svg viewBox="0 0 16 16" width="13" height="13"><rect x="2" y="3" width="12" height="2"/><rect x="2" y="7" width="12" height="2"/><rect x="2" y="11" width="12" height="2"/></svg></button>
+            <button data-vm="grid" title="Grid view" aria-label="Grid view"><svg viewBox="0 0 16 16" width="13" height="13"><rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/></svg></button>
+          </div>
           <div class="browse-actions">
-            <button id="btn-play-sel" title="Play selection"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M3 2l11 6L3 14z" fill="#333"/></svg> Play</button>
-            <button id="btn-sonic" title="Create a sonically-similar playlist from the selected track">✦ Sonic playlist</button>
-            <button id="btn-add" title="Add selection to a playlist">＋ Add to…</button>
+            <button class="aqua" id="btn-play-sel" title="Play selection"><svg class="btn-ico" viewBox="0 0 16 16" width="11" height="11"><path d="M3 2l11 6L3 14z"/></svg> Play</button>
+            <button id="btn-sonic" title="Create a sonically-similar playlist from the selected track"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M8 1l1.6 4.9L14.5 8l-4.9 1.6L8 14.5 6.4 9.6 1.5 8l4.9-1.6z"/></svg> Sonic playlist</button>
+            <button id="btn-add" title="Add selection to a playlist"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z"/></svg> Add to…</button>
             <span class="menu hidden" id="add-menu"></span>
-            <button id="btn-radio" title="Build an artist radio or library station, sized to fit your device">📻 Radio…</button>
+            <button id="btn-radio" title="Build an artist radio or library station, sized to fit your device"><svg class="btn-ico" viewBox="0 0 16 16" width="13" height="13"><circle cx="8" cy="8" r="1.6"/><path d="M4.8 4.8a4.5 4.5 0 000 6.4M11.2 4.8a4.5 4.5 0 010 6.4M2.8 2.8a7.3 7.3 0 000 10.4M13.2 2.8a7.3 7.3 0 010 10.4" fill="none" stroke="currentColor" stroke-width="1.3"/></svg> Radio…</button>
             <div class="menu radio-panel hidden" id="radio-panel">
               <div class="rp-row rp-tabs">
                 <button class="rp-tab active" data-mode="artist">Artist radio</button>
@@ -161,8 +170,19 @@
           <div class="browse-actions device-actions hidden" id="device-music-actions">
             <span id="dm-summary" class="sub"></span>
             <button id="btn-dm-select-foreign" title="Select tracks that didn't come from your Plex library">Select foreign</button>
-            <button id="btn-dm-ingest" title="Copy selected tracks into your Plex server, then remove them from the device once Plex has them">⇪ Ingest to Plex…</button>
-            <button id="btn-dm-remove" title="Delete selected tracks from the device (Plex is untouched)">🗑 Remove from device</button>
+            <button id="btn-dm-ingest" title="Copy selected tracks into your Plex server, then remove them from the device once Plex has them"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M8 1.5l3.5 3.5H9v4H7V5H4.5L8 1.5zM2 11h12v2.5a1 1 0 01-1 1H3a1 1 0 01-1-1V11z"/></svg> Ingest to Plex…</button>
+            <button id="btn-dm-remove" title="Delete selected tracks from the device (Plex is untouched)"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M6 1.5h4a1 1 0 011 1V3h3v1.5H2V3h3v-.5a1 1 0 011-1zM3.2 6h9.6l-.8 8.2a1.2 1.2 0 01-1.2 1.1H5.2A1.2 1.2 0 014 14.2L3.2 6zm2.8 1.5v6h1v-6zm3 0v6h1v-6z"/></svg> Remove from device</button>
+          </div>
+        </div>
+        <div class="album-hero hidden" id="album-hero">
+          <div class="hero-art" id="hero-art"></div>
+          <div class="hero-copy">
+            <div class="hero-name" id="hero-name"></div>
+            <div class="hero-artist" id="hero-artist"></div>
+            <div class="hero-meta" id="hero-meta"></div>
+            <div class="hero-actions">
+              <button class="aqua" id="hero-play"><svg class="btn-ico" viewBox="0 0 16 16" width="11" height="11"><path d="M3 2l11 6L3 14z"/></svg> Play album</button>
+            </div>
           </div>
         </div>
         <div class="songlist">
@@ -340,6 +360,14 @@
   </div>
 
   <div class="bottombar">
+    <div class="now-playing" id="now-playing">
+      <div class="np-art" id="np-art"></div>
+      <div class="np-copy">
+        <div class="np-title" id="np-title">Not Playing</div>
+        <div class="np-sub" id="np-sub">Select a track to preview</div>
+        <div class="np-rating" id="np-rating" aria-label="Track rating"></div>
+      </div>
+    </div>
     <button class="round-btn" id="btn-newpl" title="New playlist from selection">+</button>
     <div id="bottom-info" class="muted">—</div>
     <div class="capacity hidden" id="capacity"></div>
@@ -377,7 +405,7 @@
 
   <div class="transfer-wizard hidden" id="ingest-wizard" role="dialog" aria-modal="true" aria-labelledby="ingest-wizard-title">
     <div class="transfer-sheet">
-      <div class="transfer-icon">⇪</div>
+      <div class="transfer-icon"><svg viewBox="0 0 16 16" width="20" height="20"><path d="M8 1.5l3.5 3.5H9v4H7V5H4.5L8 1.5zM2 11h12v2.5a1 1 0 01-1 1H3a1 1 0 01-1-1V11z" fill="#fff"/></svg></div>
       <div class="transfer-copy">
         <h2 id="ingest-wizard-title">Ingest into Plex</h2>
         <p id="ingest-wizard-summary"></p>
