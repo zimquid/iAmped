@@ -185,12 +185,22 @@ class Library:
 
     def browse_tracks(self, search: str = "", sort: str = "artist",
                       offset: int = 0, limit: int = 200,
-                      min_rating: float = 0, min_plays: int = 0) -> dict:
+                      min_rating: float = 0, min_plays: int = 0,
+                      artist: str = "", album: str = "",
+                      genre: str = "", album_artist: str = "") -> dict:
         order = BROWSE_ORDER.get(sort, BROWSE_ORDER["artist"])
         where, params = [], []
         if search:
             where.append("(title LIKE ? OR artist LIKE ? OR album LIKE ?)")
             params += [f"%{search}%"] * 3
+        if artist:
+            where.append("artist = ? COLLATE NOCASE"); params.append(artist)
+        if album:
+            where.append("album = ? COLLATE NOCASE"); params.append(album)
+        if album_artist:
+            where.append("album_artist = ? COLLATE NOCASE"); params.append(album_artist)
+        if genre:
+            where.append("genre = ? COLLATE NOCASE"); params.append(genre)
         if min_rating:
             where.append("COALESCE(user_rating,0) >= ?"); params.append(min_rating)
         if min_plays:
@@ -202,6 +212,29 @@ class Library:
                 f"SELECT * FROM tracks {clause} ORDER BY {order} LIMIT ? OFFSET ?",
                 params + [int(limit), int(offset)]).fetchall()
         return {"total": total, "tracks": [dict(r) for r in rows]}
+
+    def facets(self) -> dict[str, list[dict]]:
+        def rows_for(column: str, order: str) -> list[dict]:
+            with self._conn() as c:
+                return [dict(r) for r in c.execute(
+                    f"SELECT {column} name, COUNT(*) count "
+                    f"FROM tracks WHERE COALESCE({column}, '') != '' "
+                    f"GROUP BY {column} COLLATE NOCASE ORDER BY {order}"
+                ).fetchall()]
+
+        with self._conn() as c:
+            albums = [dict(r) for r in c.execute(
+                "SELECT album name, album_artist artist, COUNT(*) count, "
+                "MIN(year) year, MIN(album_thumb) album_thumb "
+                "FROM tracks WHERE COALESCE(album, '') != '' "
+                "GROUP BY album COLLATE NOCASE, album_artist COLLATE NOCASE "
+                "ORDER BY album COLLATE NOCASE"
+            ).fetchall()]
+        return {
+            "artists": rows_for("artist", "artist COLLATE NOCASE"),
+            "albums": albums,
+            "genres": rows_for("genre", "genre COLLATE NOCASE"),
+        }
 
     def query_keys(self, sort: str, limit: int, min_rating: float = 0,
                    min_plays: int = 0) -> list[str]:
