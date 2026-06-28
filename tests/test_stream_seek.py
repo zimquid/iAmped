@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -80,6 +82,31 @@ class StreamSeekTest(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertEqual(command[command.index("-ss") + 1], "12.500")
         self.assertEqual(command[command.index("-t") + 1], "45.000")
+
+    def test_full_lossless_playback_uses_cached_mp3_file(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp.write(b"cached mp3")
+            cached_path = tmp.name
+        self.addCleanup(lambda: os.path.exists(cached_path) and os.unlink(cached_path))
+
+        with (
+            patch.object(server_module, "_lib", return_value=FakeLibrary()),
+            patch.object(server_module, "get_server", return_value=object()),
+            patch.object(server_module.plex_client, "stream_url",
+                         return_value="https://plex.example/file.flac"),
+            patch.object(server_module, "have_ffmpeg", return_value=True),
+            patch.object(server_module, "materialize",
+                         return_value=(cached_path, ".mp3")) as materialize,
+            patch.object(server_module.subprocess, "Popen") as popen,
+        ):
+            response = self.client.get("/api/stream/123")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, b"cached mp3")
+            self.assertEqual(response.headers["Content-Type"], "audio/mpeg")
+            self.assertEqual(response.headers["Accept-Ranges"], "bytes")
+
+        materialize.assert_called_once()
+        popen.assert_not_called()
 
 
 if __name__ == "__main__":
