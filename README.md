@@ -81,6 +81,8 @@ the device can be safely ejected from the same screen.
 
 - Python 3.10+
 - `ffmpeg` on `PATH` (optional — only for transcoding lossless files to MP3)
+- `mpv` on `PATH` (optional — native in-app playback for FLAC/direct Plex streams;
+  the browser player is used as a fallback)
 - `fpcalc`/Chromaprint on `PATH` (optional — strengthens ambiguous file matches)
 
 ## Run

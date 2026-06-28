@@ -13,7 +13,7 @@ import webbrowser
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 from . import (artwork, config, device_management, filler, ingest, inventory,
-               matcher, plex_client, readback)
+               matcher, playback, plex_client, readback)
 from .library import Library
 from .sync import (BACKENDS, free_bytes, list_volumes, target_format,
                    total_bytes, transcode)
@@ -854,12 +854,76 @@ def static_files(fname):
 def api_get_config():
     cfg = config.load()
     cfg["has_ffmpeg"] = have_ffmpeg()
+    cfg["native_playback"] = playback.PLAYER.status()
     return jsonify(cfg)
 
 
 @app.post("/api/config")
 def api_set_config():
     return jsonify(config.save(request.json or {}))
+
+
+@app.get("/api/playback/status")
+def api_playback_status():
+    return jsonify(playback.PLAYER.status())
+
+
+@app.post("/api/playback/play")
+def api_playback_play():
+    data = request.json or {}
+    rk = str(data.get("rating_key") or "")
+    if not rk:
+        return jsonify({"error": "rating_key is required"}), 400
+    lib = _lib()
+    tr = lib.get_tracks([rk]).get(rk)
+    if not tr:
+        return jsonify({"error": "unknown track"}), 404
+    try:
+        server = get_server()
+        url = plex_client.stream_url(server, tr["part_key"])
+        start = max(0.0, float(data.get("start") or 0))
+        return jsonify(playback.PLAYER.play(url, start))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
+
+
+@app.post("/api/playback/pause")
+def api_playback_pause():
+    try:
+        return jsonify(playback.PLAYER.pause())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
+
+
+@app.post("/api/playback/resume")
+def api_playback_resume():
+    try:
+        return jsonify(playback.PLAYER.resume())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
+
+
+@app.post("/api/playback/stop")
+def api_playback_stop():
+    return jsonify(playback.PLAYER.stop())
+
+
+@app.post("/api/playback/seek")
+def api_playback_seek():
+    try:
+        position = max(0.0, float((request.json or {}).get("position") or 0))
+        return jsonify(playback.PLAYER.seek(position))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
+
+
+@app.post("/api/playback/volume")
+def api_playback_volume():
+    try:
+        volume = float((request.json or {}).get("volume") or 0)
+        return jsonify(playback.PLAYER.set_volume(volume))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
 
 
 @app.post("/api/connect")
