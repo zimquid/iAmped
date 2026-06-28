@@ -1221,7 +1221,7 @@ def api_stream(rk):
         # proxy the original, forwarding Range so the browser can seek
         req_range = request.headers.get("Range")
         headers = {"Range": req_range} if req_range else {}
-        up = server._session.get(url, headers=headers, stream=True, timeout=60)
+        up = server._session.get(url, headers=headers, stream=True, timeout=(10, None))
         resp = Response(up.iter_content(65536), status=up.status_code)
         for h in ("Content-Type", "Content-Length", "Accept-Ranges", "Content-Range"):
             if h in up.headers:
@@ -1236,7 +1236,8 @@ def api_stream(rk):
     if duration:
         command.extend(["-t", f"{duration:.3f}"])
     command.extend(
-        ["-i", url, "-map", "0:a:0",
+        ["-reconnect", "1", "-reconnect_streamed", "1",
+         "-reconnect_delay_max", "5", "-i", url, "-map", "0:a:0",
          "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "-"],
     )
     proc = subprocess.Popen(command, stdout=subprocess.PIPE)
