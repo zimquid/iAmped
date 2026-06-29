@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from iamped import server
 from iamped.sync import device_state, hash58
-from iamped.sync.itunesdb import ITunesDBBackend, read_manifest, read_tracks_full
+from iamped.sync.itunesdb import (ITunesDBBackend, read_manifest,
+                                  read_playlists, read_tracks_full)
 from iamped.sync.massstorage import MassStorageBackend
 
 
@@ -283,6 +284,64 @@ class DeviceTransactionTest(unittest.TestCase):
 
             self.assertEqual(carried, 0)
             self.assertEqual(len(read_tracks_full(db_path.read_bytes())), 1)
+
+    def test_metadata_transaction_rebuilds_ipod_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "iPod_Control" / "Music" / "F01" / "00001.m4a"
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b"native-audio")
+            (root / "iPod_Control" / "iTunes").mkdir(parents=True)
+
+            record = {
+                "rating_key": "42",
+                "track_id": 1,
+                "path": "iPod_Control/Music/F01/00001.m4a",
+                "location": ":iPod_Control:Music:F01:00001.m4a",
+                "ext": ".m4a",
+                "size": media.stat().st_size,
+                "mac_added": 1,
+                "title": "Recovered Song",
+                "artist": "Recovered Artist",
+                "source_signature": "part|size|aac",
+            }
+            device_state.atomic_write_json(
+                device_state.journal_path(tmp, "ipod"), {
+                    "version": 2,
+                    "id": "sync-test",
+                    "device_type": "ipod",
+                    "plan_hash": "hash",
+                    "status": "metadata",
+                    "completed": {"42": record},
+                    "removals": [],
+                    "metadata_tracks": [{
+                        "rating_key": "42",
+                        "title": "Recovered Song",
+                        "artist": "Recovered Artist",
+                        "album": "Recovered Album",
+                        "duration_ms": 1234,
+                        "_sync_signature": "part|size|aac",
+                    }],
+                    "metadata_playlists": [{
+                        "title": "Recovered Playlist",
+                        "track_keys": ["42"],
+                    }],
+                })
+
+            result = server._recover_metadata_transaction(
+                tmp, "ipod", {"device_name": "Recovered iPod"})
+
+            db_path = root / "iPod_Control" / "iTunes" / "iTunesDB"
+            rows = read_tracks_full(db_path.read_bytes())
+            playlists = read_playlists(db_path.read_bytes())
+            self.assertEqual(result["metadata_recovered"], True)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["title"], "Recovered Song")
+            self.assertEqual(
+                [(p["title"], len(p["track_ids"])) for p in playlists],
+                [("Recovered iPod", 1), ("Recovered Playlist", 1)])
+            self.assertEqual(read_manifest(tmp)["tracks"][0]["rating_key"], "42")
+            self.assertFalse(Path(device_state.journal_path(tmp, "ipod")).exists())
 
 
 if __name__ == "__main__":
