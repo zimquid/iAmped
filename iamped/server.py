@@ -242,6 +242,8 @@ def _device_plan(params: dict) -> dict:
             reserve, bool(params.get("transcode_lossless", True)),
             fmt, bitrate_k, params.get("max_tracks"))
     else:
+        _ensure_selected_playlists(
+            lib, [str(pid) for pid in params.get("playlist_ids", [])])
         plan = filler.plan(
             lib, capacity, reserve, params.get("fill_strategy", "most_played"),
             params.get("playlist_ids", []),
@@ -347,7 +349,7 @@ def _bitrate_options(params: dict, budget_bytes: int) -> list[dict]:
     keys = [str(k) for k in params.get("rating_keys", [])]
     if not keys:
         for pid in params.get("playlist_ids", []):
-            keys.extend(lib.playlist_track_keys_any(pid))
+            keys.extend(_ensure_playlist_items(lib, str(pid)))
     keys = list(dict.fromkeys(keys))
     rows = lib.get_tracks(keys)
     ordered = [rows[key] for key in keys if key in rows]
@@ -477,11 +479,26 @@ def _build_library_job(job, section: str):
         count += lib.upsert_tracks(batch)
 
     job["phase"] = "playlists"
-    job["message"] = "Reading playlists…"
-    pls = plex_client.list_playlists(server)
+    job["message"] = "Reading playlist names…"
+    pls = plex_client.list_playlists(server, include_items=False)
     lib.replace_playlists(pls)
     job["result"] = {"tracks": count, "playlists": len(pls)}
     job["message"] = f"Cached {count} tracks and {len(pls)} playlists."
+
+
+def _ensure_playlist_items(lib: Library, pid: str) -> list[str]:
+    if str(pid).startswith("local:"):
+        return lib.playlist_track_keys_any(pid)
+    if lib.playlist_items_loaded(pid):
+        return lib.playlist_track_keys(pid)
+    keys = plex_client.playlist_item_keys(get_server(), pid)
+    lib.replace_playlist_items(pid, keys)
+    return keys
+
+
+def _ensure_selected_playlists(lib: Library, playlist_ids: list[str]) -> None:
+    for pid in playlist_ids:
+        _ensure_playlist_items(lib, str(pid))
 
 
 def _sync_job_inner(job, params):
@@ -1230,7 +1247,7 @@ def api_tracks():
 @app.get("/api/playlist/<path:pid>/tracks")
 def api_playlist_tracks(pid):
     lib = _lib()
-    keys = lib.playlist_track_keys_any(pid)
+    keys = _ensure_playlist_items(lib, pid)
     rows = lib.get_tracks(keys)
     tracks = [_track_view(rows[rk]) for rk in keys if rk in rows]
     return jsonify({"total": len(tracks), "tracks": tracks})

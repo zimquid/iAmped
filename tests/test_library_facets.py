@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from iamped.library import Library
-from iamped.plex_client import TrackMeta
+from iamped.plex_client import PlaylistMeta, TrackMeta
 
 
 def track(key: str, title: str, artist: str, album: str, genre: str) -> TrackMeta:
@@ -59,6 +59,24 @@ class LibraryFacetTests(unittest.TestCase):
             self.assertEqual([t["title"] for t in artist_b["tracks"]], ["Delta", "Gamma"])
             album_a_by_b = lib.browse_tracks(album="Album A", album_artist="Artist B")
             self.assertEqual([t["title"] for t in album_a_by_b["tracks"]], ["Delta"])
+
+    def test_playlist_items_can_be_loaded_lazily(self):
+        with tempfile.TemporaryDirectory() as td:
+            lib = Library(f"{td}/library.db")
+            lib.replace_playlists([
+                PlaylistMeta(
+                    plex_id="playlist-1", title="Road Trip", smart=False,
+                    duration_ms=300000, item_count=2, item_keys=[]),
+            ])
+
+            self.assertFalse(lib.playlist_items_loaded("playlist-1"))
+            self.assertEqual(lib.playlist_track_keys("playlist-1"), [])
+            self.assertEqual(lib.playlists()[0]["item_count"], 2)
+
+            lib.replace_playlist_items("playlist-1", ["7", "8"])
+
+            self.assertTrue(lib.playlist_items_loaded("playlist-1"))
+            self.assertEqual(lib.playlist_track_keys("playlist-1"), ["7", "8"])
 
 
 if __name__ == "__main__":

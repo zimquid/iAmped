@@ -166,7 +166,7 @@ def iter_tracks(server: PlexServer, section_title: str,
     section = server.library.section(section_title)
     done = 0
     total = None
-    page_size = 200
+    page_size = 1000
 
     while True:
         page = section.searchTracks(
@@ -314,23 +314,51 @@ class PlaylistMeta:
     title: str
     smart: bool
     duration_ms: int
+    item_count: int | None = None
     item_keys: list[str] = field(default_factory=list)   # ordered rating keys
 
 
-def list_playlists(server: PlexServer) -> list[PlaylistMeta]:
+def _playlist_item_count(pl) -> int | None:
+    for attr in ("leafCount", "childCount", "item_count", "playlistItemCount"):
+        value = getattr(pl, attr, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def playlist_item_keys(server: PlexServer, playlist_id: str) -> list[str]:
+    for pl in server.playlists():
+        if str(getattr(pl, "ratingKey", "")) != str(playlist_id):
+            continue
+        try:
+            return [str(item.ratingKey) for item in pl.items()]
+        except Exception:
+            return []
+    return []
+
+
+def list_playlists(server: PlexServer, include_items: bool = True) -> list[PlaylistMeta]:
     out: list[PlaylistMeta] = []
     for pl in server.playlists():
         if getattr(pl, "playlistType", None) != "audio":
             continue
-        try:
-            items = pl.items()
-        except Exception:
-            items = []
+        items = []
+        item_count = _playlist_item_count(pl)
+        if include_items:
+            try:
+                items = pl.items()
+            except Exception:
+                items = []
+            item_count = len(items)
         out.append(PlaylistMeta(
             plex_id=str(pl.ratingKey),
             title=pl.title,
             smart=bool(getattr(pl, "smart", False)),
             duration_ms=int(getattr(pl, "duration", 0) or 0),
+            item_count=item_count,
             item_keys=[str(i.ratingKey) for i in items],
         ))
     return out

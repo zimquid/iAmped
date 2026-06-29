@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tracks (
 );
 CREATE TABLE IF NOT EXISTS playlists (
     plex_id TEXT PRIMARY KEY, title TEXT, smart INTEGER,
-    duration_ms INTEGER, item_count INTEGER
+    duration_ms INTEGER, item_count INTEGER, items_loaded INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS playlist_items (
     plex_id TEXT, rating_key TEXT, position INTEGER,
@@ -72,6 +72,11 @@ class Library:
             for name in ("album_key", "album_thumb"):
                 if name not in existing:
                     c.execute(f"ALTER TABLE tracks ADD COLUMN {name} TEXT")
+            playlist_cols = {
+                r["name"] for r in c.execute("PRAGMA table_info(playlists)")}
+            if "items_loaded" not in playlist_cols:
+                c.execute(
+                    "ALTER TABLE playlists ADD COLUMN items_loaded INTEGER DEFAULT 1")
 
     @contextmanager
     def _conn(self):
@@ -104,16 +109,33 @@ class Library:
             c.execute("DELETE FROM playlists")
             c.execute("DELETE FROM playlist_items")
             for pl in playlists:
+                item_count = pl.item_count if pl.item_count is not None \
+                    else len(pl.item_keys)
                 c.execute(
-                    "INSERT INTO playlists VALUES (?,?,?,?,?)",
+                    "INSERT INTO playlists "
+                    "(plex_id, title, smart, duration_ms, item_count, items_loaded) "
+                    "VALUES (?,?,?,?,?,?)",
                     (pl.plex_id, pl.title, int(pl.smart), pl.duration_ms,
-                     len(pl.item_keys)),
+                     item_count, int(bool(pl.item_keys) or item_count == 0)),
                 )
-                c.executemany(
-                    "INSERT OR REPLACE INTO playlist_items VALUES (?,?,?)",
-                    [(pl.plex_id, rk, i) for i, rk in enumerate(pl.item_keys)],
-                )
+                if pl.item_keys:
+                    c.executemany(
+                        "INSERT OR REPLACE INTO playlist_items VALUES (?,?,?)",
+                        [(pl.plex_id, rk, i) for i, rk in enumerate(pl.item_keys)],
+                    )
         return len(playlists)
+
+    def replace_playlist_items(self, plex_id: str, item_keys: list[str]) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM playlist_items WHERE plex_id=?", (plex_id,))
+            c.executemany(
+                "INSERT OR REPLACE INTO playlist_items VALUES (?,?,?)",
+                [(plex_id, rk, i) for i, rk in enumerate(item_keys)],
+            )
+            c.execute(
+                "UPDATE playlists SET item_count=?, items_loaded=1 WHERE plex_id=?",
+                (len(item_keys), plex_id),
+            )
 
     def set_cached(self, rating_key: str, path: Optional[str], size: Optional[int]):
         with self._conn() as c:
@@ -146,6 +168,13 @@ class Library:
             return [r["rating_key"] for r in c.execute(
                 "SELECT rating_key FROM playlist_items WHERE plex_id=? "
                 "ORDER BY position", (plex_id,)).fetchall()]
+
+    def playlist_items_loaded(self, plex_id: str) -> bool:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT items_loaded FROM playlists WHERE plex_id=?",
+                (plex_id,)).fetchone()
+        return bool(row and row["items_loaded"])
 
     def get_tracks(self, rating_keys: list[str]) -> dict[str, dict]:
         if not rating_keys:

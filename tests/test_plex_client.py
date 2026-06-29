@@ -56,6 +56,51 @@ class PlexClientProgressTests(unittest.TestCase):
         self.assertEqual(progress[0], (0, 3))
         self.assertEqual(progress[-1], (3, 3))
 
+    def test_list_playlists_can_skip_expensive_item_fetches(self):
+        class Playlist:
+            playlistType = "audio"
+            ratingKey = "99"
+            title = "Road Trip"
+            smart = False
+            duration = 123000
+            leafCount = 2
+
+            def items(self):
+                raise AssertionError("items should be fetched lazily")
+
+        server = SimpleNamespace(playlists=lambda: [Playlist()])
+
+        playlists = plex_client.list_playlists(server, include_items=False)
+
+        self.assertEqual(len(playlists), 1)
+        self.assertEqual(playlists[0].item_count, 2)
+        self.assertEqual(playlists[0].item_keys, [])
+
+    def test_playlist_item_keys_fetches_only_requested_playlist(self):
+        class Playlist:
+            playlistType = "audio"
+            smart = False
+            duration = 0
+
+            def __init__(self, key, items):
+                self.ratingKey = key
+                self.title = f"Playlist {key}"
+                self._items = items
+                self.calls = 0
+
+            def items(self):
+                self.calls += 1
+                return [SimpleNamespace(ratingKey=item) for item in self._items]
+
+        first = Playlist("1", ["a"])
+        second = Playlist("2", ["b", "c"])
+        server = SimpleNamespace(playlists=lambda: [first, second])
+
+        self.assertEqual(
+            plex_client.playlist_item_keys(server, "2"), ["b", "c"])
+        self.assertEqual(first.calls, 0)
+        self.assertEqual(second.calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
