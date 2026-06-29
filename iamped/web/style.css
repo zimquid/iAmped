@@ -297,6 +297,8 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
 .songrow div { padding: 5px 8px; border-right: 1px solid rgba(160,170,180,.2);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .c-num { width: 36px; color: #999; text-align: right; }
+.c-check input { margin: 0; vertical-align: middle; }
+.c-check.select-all-hidden input { visibility: hidden; }
 .c-name { flex: 2; min-width: 0; }
 .c-artist { flex: 1.4; min-width: 0; color: #333; }
 .c-album { flex: 1.4; min-width: 0; color: #555; }

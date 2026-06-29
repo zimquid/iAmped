@@ -64,6 +64,7 @@ const STATE = {
   view: null,          // {type:'library'|'playlist', id, title, source}
   tracks: [],          // current queue
   selected: new Set(),
+  lastSelectedIndex: null,
   sort: "artist",
   search: "",
   offset: 0, total: 0, loading: false,
@@ -680,6 +681,7 @@ async function openDeviceMusic(el) {
   $("browse-title").textContent = `${el.dataset.name} — Music`;
   $("btn-del-pl").classList.add("hidden");
   selectPane("pane-browse", el);
+  STATE.selected.clear(); STATE.lastSelectedIndex = null;
   STATE.tracks = []; $("browse-body").innerHTML = "";
   lcd("Reading device…", path);
   try {
@@ -941,7 +943,7 @@ async function openPlaylist(el) {
 function rowHtml(t, i) {
   return `
     <div class="songrow${STATE.selected.has(t.rating_key) ? " selected" : ""}${STATE.playing === i ? " playing" : ""}" data-idx="${i}" data-rk="${esc(t.rating_key)}">
-      <div class="c-check"><input type="checkbox" tabindex="-1" ${STATE.selected.has(t.rating_key) ? "checked" : ""}></div>
+      <div class="c-check"><input type="checkbox" tabindex="-1" aria-label="Select ${esc(t.title || "track")}" ${STATE.selected.has(t.rating_key) ? "checked" : ""}></div>
       <div class="c-num">${i + 1}</div>
       <div class="c-play">${STATE.playing === i ? "►" : ""}</div>
       <div class="c-name">${esc(t.title)}${t.lossless ? ' <span class="lossless-tag">FLAC</span>' : ''}</div>
@@ -953,10 +955,21 @@ function rowHtml(t, i) {
 function bindRows(rows) {
   rows.forEach((row) => {
     const idx = Number(row.dataset.idx);
+    const check = row.querySelector(".c-check input");
+    if (check) {
+      check.onclick = (e) => {
+        e.stopPropagation();
+        selectRow(idx, {
+          additive: true,
+          range: e.shiftKey,
+          force: check.checked,
+        });
+      };
+    }
     row.onclick = (e) => {
       const star = e.target.closest(".row-star");
       if (star) { e.stopPropagation(); rateTrackByKey(idx, Number(star.dataset.star) * 2); return; }
-      selectRow(idx, e.metaKey || e.ctrlKey);
+      selectRow(idx, { additive: e.metaKey || e.ctrlKey, range: e.shiftKey });
     };
     row.ondblclick = () => playIndex(idx);
     row.oncontextmenu = (e) => showCtxMenu(e, idx);
@@ -997,6 +1010,7 @@ function renderTracks() {
   const body = $("browse-body");
   body.innerHTML = STATE.tracks.map((t, i) => rowHtml(t, i)).join("");
   bindRows([...body.querySelectorAll(".songrow")]);
+  syncTrackSelectionUi();
   updateDeviceMusicActions();
   bottomBrowse();
 }
@@ -1008,14 +1022,62 @@ function appendTracks(newOnes, startIdx) {
   body.insertAdjacentHTML("beforeend",
     newOnes.map((t, k) => rowHtml(t, startIdx + k)).join(""));
   bindRows([...body.querySelectorAll(".songrow")].slice(before));
+  updateBrowseSelectAll();
   bottomBrowse();
 }
-function selectRow(idx, additive) {
-  const rk = STATE.tracks[idx].rating_key;
-  if (!additive) STATE.selected.clear();
-  if (STATE.selected.has(rk) && additive) STATE.selected.delete(rk); else STATE.selected.add(rk);
-  document.querySelectorAll("#browse-body .songrow").forEach((r) => r.classList.toggle("selected", STATE.selected.has(r.dataset.rk)));
+function updateBrowseSelectAll() {
+  const check = $("browse-select-all");
+  if (!check) return;
+  const onDevice = STATE.view?.type === "device";
+  const tracks = onDevice ? STATE.tracks : [];
+  const selectedCount = tracks.filter((t) => STATE.selected.has(t.rating_key)).length;
+  check.closest(".c-check")?.classList.toggle("select-all-hidden", !onDevice);
+  check.disabled = !onDevice || !tracks.length;
+  check.checked = onDevice && tracks.length > 0 && selectedCount === tracks.length;
+  check.indeterminate = onDevice && selectedCount > 0 && selectedCount < tracks.length;
+}
+function syncTrackSelectionUi() {
+  document.querySelectorAll("#browse-body .songrow").forEach((r) => {
+    const selected = STATE.selected.has(r.dataset.rk);
+    r.classList.toggle("selected", selected);
+    const check = r.querySelector(".c-check input");
+    if (check) check.checked = selected;
+  });
+  updateBrowseSelectAll();
   if (STATE.view?.type === "device") updateDeviceMusicActions();
+}
+function selectRow(idx, opts = false) {
+  const options = typeof opts === "object" ? opts : { additive: !!opts };
+  if (idx < 0 || idx >= STATE.tracks.length) return;
+  const rk = STATE.tracks[idx].rating_key;
+  const anchor = Number.isInteger(STATE.lastSelectedIndex)
+    ? Math.max(0, Math.min(STATE.lastSelectedIndex, STATE.tracks.length - 1))
+    : idx;
+  if (options.range) {
+    if (!options.additive) STATE.selected.clear();
+    const start = Math.min(anchor, idx);
+    const end = Math.max(anchor, idx);
+    for (let i = start; i <= end; i += 1) {
+      const key = STATE.tracks[i].rating_key;
+      if (options.force === false) STATE.selected.delete(key);
+      else STATE.selected.add(key);
+    }
+  } else {
+    if (!options.additive) STATE.selected.clear();
+    if (options.force === false) STATE.selected.delete(rk);
+    else if (STATE.selected.has(rk) && options.additive && options.force !== true) STATE.selected.delete(rk);
+    else STATE.selected.add(rk);
+  }
+  STATE.lastSelectedIndex = idx;
+  syncTrackSelectionUi();
+}
+function toggleBrowseSelectAll() {
+  if (STATE.view?.type !== "device") return;
+  const check = $("browse-select-all");
+  STATE.lastSelectedIndex = null;
+  if (check.checked) STATE.tracks.forEach((t) => STATE.selected.add(t.rating_key));
+  else STATE.selected.clear();
+  syncTrackSelectionUi();
 }
 
 // ---- device music: remove / ingest action bar ---------------------------
@@ -1039,8 +1101,8 @@ function updateDeviceMusicActions() {
 function selectForeignDeviceTracks() {
   STATE.selected.clear();
   STATE.tracks.forEach((t) => { if (t._origin === "foreign") STATE.selected.add(t.rating_key); });
-  document.querySelectorAll("#browse-body .songrow").forEach((r) => r.classList.toggle("selected", STATE.selected.has(r.dataset.rk)));
-  updateDeviceMusicActions();
+  STATE.lastSelectedIndex = null;
+  syncTrackSelectionUi();
 }
 function _deviceRemoveBody(tracks) {
   const dm = STATE.deviceMusic;
@@ -1060,6 +1122,7 @@ async function removeSelectedDeviceMusic() {
     lcd("iAmped", `Removed ${r.removed} — freed ${fmtBytes(r.freed_bytes || 0)}.` +
       (STATE.deviceMusic.type === "ipod" ? " Eject safely before unplugging." : ""));
     STATE.selected.clear();
+    STATE.lastSelectedIndex = null;
     await reloadDeviceMusic();
     await loadSidebar();
   } catch (e) { alert(e.message); }
@@ -1125,6 +1188,7 @@ async function confirmIngest() {
         s.className = "status ok"; s.textContent = j.message;
         lcd("iAmped", j.message);
         STATE.selected.clear();
+        STATE.lastSelectedIndex = null;
         await reloadDeviceMusic(); await loadSidebar(); await refreshStats();
         if (!(r.unconfirmed || []).length) setTimeout(closeIngest, 1500);
       },
@@ -2170,6 +2234,7 @@ $("btn-match").onclick = matchDeviceFiles;
 $("btn-dm-select-foreign").onclick = selectForeignDeviceTracks;
 $("btn-dm-remove").onclick = removeSelectedDeviceMusic;
 $("btn-dm-ingest").onclick = ingestSelectedDeviceMusic;
+$("browse-select-all").onclick = toggleBrowseSelectAll;
 $("btn-save-ingest").onclick = saveIngestDir;
 $("ingest-cancel").onclick = closeIngest;
 $("ingest-confirm").onclick = confirmIngest;
