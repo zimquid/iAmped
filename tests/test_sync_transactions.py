@@ -231,6 +231,24 @@ class DeviceTransactionTest(unittest.TestCase):
             self.assertTrue(device_state.record_is_valid(tmp, resumed_tx["completed"]["7"]))
             self.assertFalse(Path(str(destination) + device_state.PART_SUFFIX).exists())
 
+    def test_completed_records_can_be_checkpointed_in_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tx, _ = device_state.start_or_resume(
+                tmp, "ipod", "same-plan", [])
+            record = {"rating_key": "7", "path": "Music/F01/00001.m4a",
+                      "size": 0}
+
+            device_state.record_completed(
+                tmp, "ipod", tx, "7", record, checkpoint_now=False)
+            pending = device_state.read_json(
+                device_state.journal_path(tmp, "ipod"))
+            self.assertNotIn("7", pending["completed"])
+
+            device_state.checkpoint(tmp, "ipod", tx)
+            flushed = device_state.read_json(
+                device_state.journal_path(tmp, "ipod"))
+            self.assertEqual(flushed["completed"]["7"]["rating_key"], "7")
+
     def test_different_plan_is_rejected_while_transaction_is_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
             device_state.start_or_resume(tmp, "massstorage", "plan-a", [])

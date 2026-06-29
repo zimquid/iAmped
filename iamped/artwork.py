@@ -31,8 +31,17 @@ def materialize(server, track: dict) -> str | None:
     if not thumb:
         return None
     path = cache_path(track)
-    if not (os.path.exists(path) and os.path.getsize(path) > 0):
-        plex_client.download_image(server, thumb, path)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        try:
+            with Image.open(path) as existing:
+                existing.verify()
+            return path
+        except OSError:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    plex_client.download_image(server, thumb, path)
     try:
         with Image.open(path) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")

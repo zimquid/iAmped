@@ -182,9 +182,11 @@ def checkpoint(device_path: str, device_type: str, tx: dict) -> None:
 
 
 def record_completed(device_path: str, device_type: str, tx: dict,
-                     rating_key: str, record: dict) -> None:
+                     rating_key: str, record: dict,
+                     checkpoint_now: bool = True) -> None:
     tx.setdefault("completed", {})[str(rating_key)] = record
-    checkpoint(device_path, device_type, tx)
+    if checkpoint_now:
+        checkpoint(device_path, device_type, tx)
 
 
 def record_is_valid(device_path: str, record: dict) -> bool:
