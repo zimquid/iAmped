@@ -592,13 +592,23 @@ def _sync_job_inner(job, params):
                 album_futures[album_id] = future
             art_futures.append(future)
         base_done = job["done"]
+        checkpoint_interval = 8 if dtype == "ipod" else 1
+        pending_checkpoint = False
         for i, tr in enumerate(remaining):
             src, ext = futures[i].result()
             art_path = art_futures[i].result() if art_futures[i] else None
             record = backend.add_track(tr, src, ext, art_path)
-            device_state.record_completed(path, dtype, tx, str(tr["rating_key"]), record)
+            device_state.record_completed(
+                path, dtype, tx, str(tr["rating_key"]), record,
+                checkpoint_now=checkpoint_interval == 1)
+            pending_checkpoint = checkpoint_interval > 1
+            if pending_checkpoint and (i + 1) % checkpoint_interval == 0:
+                device_state.checkpoint(path, dtype, tx)
+                pending_checkpoint = False
             job["done"] = base_done + i + 1
             job["message"] = f"{tr.get('artist','')} – {tr.get('title','')}"
+        if pending_checkpoint:
+            device_state.checkpoint(path, dtype, tx)
     job["done"] = len(tracks)
 
     job["phase"] = "playlists"
