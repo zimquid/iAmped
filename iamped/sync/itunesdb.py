@@ -796,6 +796,8 @@ class ITunesDBBackend:
             if name.casefold() in replaced_names:
                 continue
             ids = [tid for tid in track_ids if tid in valid_ids]
+            if not ids:
+                continue
             playlists.append(self._build_mhyp(name, ids, False, pl_id))
             pl_id += 1
         for name, keys in self._playlists:

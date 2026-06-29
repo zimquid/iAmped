@@ -371,6 +371,93 @@ def _bitrate_options(params: dict, budget_bytes: int) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- jobs
+def _metadata_track_snapshot(track: dict) -> dict:
+    """Small durable copy of track metadata needed to rebuild device DBs."""
+    keys = (
+        "rating_key", "title", "artist", "album", "album_artist", "genre",
+        "year", "track_number", "disc_number", "duration_ms", "view_count",
+        "user_rating", "last_viewed_at", "bitrate", "_sync_signature",
+    )
+    return {key: track.get(key) for key in keys if key in track}
+
+
+def _minimal_track_from_record(record: dict) -> dict:
+    track = {
+        "rating_key": str(record.get("rating_key")),
+        "title": record.get("title"),
+        "artist": record.get("artist"),
+        "album": record.get("album"),
+        "duration_ms": record.get("duration_ms") or 0,
+        "_sync_signature": record.get("source_signature"),
+    }
+    return track
+
+
+def _recover_metadata_transaction(path: str, dtype: str,
+                                  params: dict | None = None) -> dict | None:
+    """Finish a transaction that copied files but did not publish metadata.
+
+    The common real-world case is an iPod sync interrupted during finalization:
+    the audio files are present and journaled, but the iTunesDB still points at
+    the previous state. Rebuild from the journal before doing new work so the
+    device never stays invisible until the user reconstructs the same plan.
+    """
+    tx = device_state.read_json(device_state.journal_path(path, dtype))
+    if not tx or tx.get("status") != "metadata":
+        return None
+
+    completed = tx.get("completed") or {}
+    backend_cls = BACKENDS[dtype]
+    if dtype == "ipod":
+        backend = backend_cls(path, (params or {}).get("device_name") or "iPod")
+    else:
+        backend = backend_cls(path, _resolve_capability(params or {}).layout)
+    backend.prepare()
+
+    metadata_tracks = {
+        str(track.get("rating_key")): track
+        for track in tx.get("metadata_tracks", [])
+        if track.get("rating_key") is not None
+    }
+    if metadata_tracks:
+        carried = backend.import_existing(metadata_tracks, completed)
+    else:
+        # Legacy journals did not store the desired track set. Preserve whatever
+        # the current DB/manifest can prove, then restore completed files below.
+        carried = backend.import_existing(None, completed)
+
+    for key, record in sorted(
+            completed.items(),
+            key=lambda item: int((item[1] or {}).get("track_id") or 0)):
+        if not device_state.record_is_valid(path, record):
+            continue
+        track = metadata_tracks.get(str(key)) or _minimal_track_from_record(record)
+        if not track.get("_sync_signature"):
+            track["_sync_signature"] = record.get("source_signature")
+        backend.restore_track(track, record)
+
+    for playlist in tx.get("metadata_playlists", []):
+        backend.add_playlist(
+            playlist.get("title") or "Playlist",
+            [str(key) for key in playlist.get("track_keys", [])])
+
+    backend.finalize()
+    removed = device_state.finish_cleanup(path, dtype, tx)
+    return {
+        "tracks_added": len(completed),
+        "tracks_updated": 0,
+        "tracks_preserved": carried,
+        "tracks_removed": removed,
+        "tracks_total": carried + len(completed),
+        "managed_tracks_total": len(metadata_tracks) or len(completed),
+        "playlists": len(tx.get("metadata_playlists", [])),
+        "bytes": sum(int((r or {}).get("size") or 0)
+                     for r in completed.values()),
+        "resumed": True,
+        "metadata_recovered": True,
+    }
+
+
 def _build_library_job(job, section: str):
     server = get_server()
     lib = _lib()
@@ -398,11 +485,22 @@ def _build_library_job(job, section: str):
 
 
 def _sync_job_inner(job, params):
-    server = get_server()
-    lib = _lib()
     is_ipod = params["device_type"] == "ipod"
     dtype = params["device_type"]
     path = params["device_path"]
+    recovered_meta = _recover_metadata_transaction(path, dtype, params)
+    if recovered_meta:
+        job["phase"] = "finalizing"
+        job["done"] = recovered_meta["tracks_added"]
+        job["total"] = recovered_meta["tracks_added"]
+        job["result"] = recovered_meta
+        job["message"] = (
+            f"Recovered interrupted metadata commit → "
+            f"{recovered_meta['tracks_total']} track(s) visible on {path}.")
+        return
+
+    server = get_server()
+    lib = _lib()
     recovered = device_state.recover_cleanup(path, dtype)
     job["phase"] = "planning"
     job["message"] = "Choosing tracks to fit the device…"
@@ -511,6 +609,12 @@ def _sync_job_inner(job, params):
     job["phase"] = "finalizing"
     job["message"] = "Finalizing device database…"
     tx["status"] = "metadata"
+    tx["metadata_tracks"] = [
+        _metadata_track_snapshot(track) for track in plan["tracks"]]
+    tx["metadata_playlists"] = [{
+        "title": playlist["title"],
+        "track_keys": [str(key) for key in playlist["track_keys"]],
+    } for playlist in plan["playlists"]]
     device_state.checkpoint(path, dtype, tx)
     backend.finalize()
     removed = device_state.finish_cleanup(path, dtype, tx)
