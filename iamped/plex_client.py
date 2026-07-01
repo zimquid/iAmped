@@ -41,6 +41,7 @@ class TrackMeta:
     server_file: str                  # path on the Plex server (informational)
     album_key: str = ""
     album_thumb: str = ""
+    artist_thumb: str = ""            # grandparentThumb — image for the artist
 
 
 @dataclass
@@ -157,6 +158,7 @@ def track_to_meta(track) -> Optional[TrackMeta]:
         server_file=getattr(part, "file", "") or "",
         album_key=str(getattr(track, "parentRatingKey", "") or ""),
         album_thumb=getattr(track, "parentThumb", "") or "",
+        artist_thumb=getattr(track, "grandparentThumb", "") or "",
     )
 
 
@@ -205,6 +207,7 @@ def _elem_to_meta(el) -> Optional[TrackMeta]:
         server_file=part.get("file") or "",
         album_key=str(el.get("parentRatingKey") or ""),
         album_thumb=el.get("parentThumb") or "",
+        artist_thumb=el.get("grandparentThumb") or "",
     )
 
 
