@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     user_rating  REAL, last_viewed_at INTEGER,
     container    TEXT, codec TEXT, bitrate INTEGER, file_size INTEGER,
     part_key     TEXT, server_file TEXT, album_key TEXT, album_thumb TEXT,
+    artist_thumb TEXT,
     cached_path  TEXT, cached_size INTEGER
 );
 CREATE TABLE IF NOT EXISTS playlists (
@@ -58,7 +59,7 @@ TRACK_COLS = [
     "rating_key", "title", "artist", "album", "album_artist", "genre", "year",
     "track_number", "disc_number", "duration_ms", "view_count", "user_rating",
     "last_viewed_at", "container", "codec", "bitrate", "file_size",
-    "part_key", "server_file", "album_key", "album_thumb",
+    "part_key", "server_file", "album_key", "album_thumb", "artist_thumb",
 ]
 
 
@@ -69,7 +70,7 @@ class Library:
         with self._conn() as c:
             c.executescript(SCHEMA)
             existing = {r["name"] for r in c.execute("PRAGMA table_info(tracks)")}
-            for name in ("album_key", "album_thumb"):
+            for name in ("album_key", "album_thumb", "artist_thumb"):
                 if name not in existing:
                     c.execute(f"ALTER TABLE tracks ADD COLUMN {name} TEXT")
 
@@ -230,8 +231,18 @@ class Library:
                 "GROUP BY album COLLATE NOCASE, album_artist COLLATE NOCASE "
                 "ORDER BY album COLLATE NOCASE"
             ).fetchall()]
+            # Alias the artist image to album_thumb so the facet tiles render it
+            # with the same code path as albums. MAX(NULLIF(...)) picks a
+            # populated thumb over the blanks left by tracks with no artist art.
+            artists = [dict(r) for r in c.execute(
+                "SELECT artist name, COUNT(*) count, "
+                "MAX(NULLIF(artist_thumb, '')) album_thumb "
+                "FROM tracks WHERE COALESCE(artist, '') != '' "
+                "GROUP BY artist COLLATE NOCASE "
+                "ORDER BY artist COLLATE NOCASE"
+            ).fetchall()]
         return {
-            "artists": rows_for("artist", "artist COLLATE NOCASE"),
+            "artists": artists,
             "albums": albums,
             "genres": rows_for("genre", "genre COLLATE NOCASE"),
         }

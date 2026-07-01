@@ -7,7 +7,8 @@ from iamped.library import Library
 from iamped.plex_client import TrackMeta
 
 
-def track(key: str, title: str, artist: str, album: str, genre: str) -> TrackMeta:
+def track(key: str, title: str, artist: str, album: str, genre: str,
+          artist_thumb: str = "") -> TrackMeta:
     return TrackMeta(
         rating_key=key,
         title=title,
@@ -30,6 +31,7 @@ def track(key: str, title: str, artist: str, album: str, genre: str) -> TrackMet
         server_file=f"/music/{key}.mp3",
         album_key=f"album-{album}",
         album_thumb=f"/thumb/{album}.jpg",
+        artist_thumb=artist_thumb,
     )
 
 
@@ -38,14 +40,22 @@ class LibraryFacetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             lib = Library(f"{td}/library.db")
             lib.upsert_tracks([
+                # Artist A has art on only one of its two tracks — the facet
+                # should still surface it (MAX picks the populated thumb).
                 track("1", "Alpha", "Artist A", "Album A", "Rock"),
-                track("2", "Beta", "Artist A", "Album A", "Rock"),
+                track("2", "Beta", "Artist A", "Album A", "Rock",
+                      artist_thumb="/thumb/artist-a.jpg"),
                 track("3", "Gamma", "Artist B", "Album B", "Jazz"),
                 track("4", "Delta", "Artist B", "Album A", "Jazz"),
             ])
 
             facets = lib.facets()
-            self.assertEqual(facets["artists"][0], {"name": "Artist A", "count": 2})
+            self.assertEqual(facets["artists"][0], {
+                "name": "Artist A", "count": 2,
+                "album_thumb": "/thumb/artist-a.jpg"})
+            # Artist B has no art anywhere -> thumb comes back empty (None).
+            self.assertEqual(facets["artists"][1],
+                             {"name": "Artist B", "count": 2, "album_thumb": None})
             self.assertEqual(facets["genres"], [
                 {"name": "Jazz", "count": 2},
                 {"name": "Rock", "count": 2},
