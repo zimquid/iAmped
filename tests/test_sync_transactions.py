@@ -119,8 +119,8 @@ class DeviceTransactionTest(unittest.TestCase):
             job = {}
             with patch.object(server, "_lib", return_value=FakeLibrary()), \
                     patch.object(server, "get_server", return_value=object()), \
-                    patch.object(server, "materialize",
-                                 return_value=(str(source), ".mp3")):
+                    patch.object(server, "_materialize",
+                                 return_value=(str(source), ".mp3", 0.0, 0.0)):
                 server._sync_job(job, params)
 
             manifest = device_state.read_manifest(tmp, "massstorage")
@@ -233,8 +233,18 @@ class DeviceTransactionTest(unittest.TestCase):
     def test_different_plan_is_rejected_while_transaction_is_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
             device_state.start_or_resume(tmp, "massstorage", "plan-a", [])
-            with self.assertRaisesRegex(RuntimeError, "different settings"):
+            with self.assertRaises(device_state.PendingTransactionError) as ctx:
                 device_state.start_or_resume(tmp, "massstorage", "plan-b", [])
+            self.assertEqual(ctx.exception.code, "pending_transaction")
+            # A blocked new plan can be surfaced and cleared without guessing the
+            # old selection.
+            self.assertIsNotNone(device_state.pending_transaction(tmp, "massstorage"))
+            discarded = device_state.discard_transaction(tmp, "massstorage")
+            self.assertTrue(discarded["discarded"])
+            self.assertIsNone(device_state.pending_transaction(tmp, "massstorage"))
+            # After discarding, a fresh differently-configured sync starts clean.
+            _, resumed = device_state.start_or_resume(tmp, "massstorage", "plan-b", [])
+            self.assertFalse(resumed)
 
     def test_native_ipod_database_and_manifest_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

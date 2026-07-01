@@ -79,6 +79,7 @@ class Device:
     free: int = 0
 
     mounted: bool = False
+    is_sd: bool = False                # a plain SD/memory card surfaced in SD mode
     is_ipod: bool = False
     ipod_format: Optional[str] = None  # the iPod data partition's fs
     ipod_model: str = ""               # friendly model, e.g. "iPod nano (1st generation)"

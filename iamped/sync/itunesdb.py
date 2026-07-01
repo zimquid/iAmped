@@ -31,8 +31,9 @@ import time
 
 from ..devices import usbdetect
 from .base import free_bytes
-from .device_state import (atomic_copy, atomic_write_bytes, read_manifest as
-                           read_device_manifest, write_manifest)
+from .device_state import (PART_SUFFIX, atomic_copy, atomic_write_bytes,
+                           read_manifest as read_device_manifest,
+                           write_manifest)
 from . import hash58
 
 MANIFEST_REL = os.path.join("iPod_Control", ".iamped", "manifest.json")
@@ -879,6 +880,48 @@ class ITunesDBBackend:
             shutil.copyfile(path, path + ".iamped.bak")
         atomic_write_bytes(path, db)
         self._write_manifest()
+
+    def sweep_orphans(self) -> dict:
+        """Delete audio/video files under ``iPod_Control/Music`` that no staged
+        entry references — the classic iPod "Other" junk. Interrupted syncs (or
+        older iAmped builds) can leave a copied file behind that the iTunesDB
+        never points at; the iPod firmware and macOS then count those bytes as
+        "Other" and they silently eat capacity forever.
+
+        Safe because :meth:`import_existing` stages *every* file the current DB
+        references (foreign tracks included), so anything unreferenced here is
+        genuinely dangling. Also clears stray ``.iamped-part`` temp files from a
+        copy that died mid-write. Call after the entry set is authoritative
+        (i.e. after :meth:`import_existing`, and after :meth:`finalize` in a
+        sync). Returns ``{"removed", "freed_bytes", "scanned"}``."""
+        referenced = {
+            os.path.normcase(os.path.join(self.root,
+                                          location_to_relpath(e.location)))
+            for e in self._entries
+        }
+        removed = freed = scanned = 0
+        for i in range(NUM_MUSIC_FOLDERS):
+            folder = os.path.join(self.music, f"F{i:02d}")
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                continue
+            for nm in names:
+                full = os.path.join(folder, nm)
+                if not os.path.isfile(full):
+                    continue
+                scanned += 1
+                is_part = nm.endswith(PART_SUFFIX)
+                if not is_part and os.path.normcase(full) in referenced:
+                    continue
+                try:
+                    sz = os.path.getsize(full)
+                    os.remove(full)
+                    removed += 1
+                    freed += sz
+                except OSError:
+                    pass
+        return {"removed": removed, "freed_bytes": freed, "scanned": scanned}
 
     def _write_manifest(self) -> None:
         """Persist track_id → Plex ratingKey so playback stats read back from

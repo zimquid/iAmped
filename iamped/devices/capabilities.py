@@ -73,8 +73,37 @@ def _has_rockbox(mountpoint: str | None) -> bool:
         return False
 
 
-def classify(device) -> Capability:
-    """Best-guess transport + layout for *device*. Never raises."""
+def is_plain_volume(device) -> bool:
+    """True for a generic mounted volume with no player identity — a plain SD
+    card or unbranded USB drive, as opposed to an iPod, an MTP player, or a
+    recognised USB player.
+
+    These are hidden from the device list unless the user turns on SD-card mode
+    (File → Enable SD card), so the app stays focused on real players by default.
+    """
+    if getattr(device, "is_ipod", False):
+        return False
+    if getattr(device, "transport", "") == TRANSPORT_MTP or \
+            getattr(device, "mtp_busloc", ""):
+        return False
+    if not getattr(device, "mounted", False):
+        return False
+    if _has_rockbox(getattr(device, "mountpoint", None)):
+        return False
+    name = f"{device.name} {device.model}".lower()
+    if any(m in name for m in _RECURSIVE_MARKERS) or \
+            any(m in name for m in _FLAT_SCAN_MARKERS):
+        return False
+    return True
+
+
+def classify(device, sd_mode: bool = False) -> Capability:
+    """Best-guess transport + layout for *device*. Never raises.
+
+    ``sd_mode`` reflects the user's File → Enable SD card toggle: when on, a
+    plain mounted card/drive is treated as an SD-card target (nested Music tree)
+    rather than falling through to the flat unknown-player default.
+    """
     name = f"{device.name} {device.model}".lower()
 
     # 1. iPod — its own database format.
@@ -103,7 +132,20 @@ def classify(device) -> Capability:
             TRANSPORT_UMS, LAYOUT_FLAT,
             "Flat-scan player — only sees root and one folder level")
 
-    # 5. Unknown mass-storage device: default to FLAT. One-level folders are
+    # 5. SD card / plain USB drive, only when the user has enabled SD-card mode.
+    #    Given a real filesystem to browse, a card in a phone, car head-unit or
+    #    Rockbox player reads a nested tree with tags, so use the tidy
+    #    Music/<Artist>/<Album> layout rather than the flat fallback.
+    if sd_mode and is_plain_volume(device):
+        try:
+            device.is_sd = True
+        except AttributeError:
+            pass
+        return Capability(
+            TRANSPORT_UMS, LAYOUT_NESTED,
+            "SD card — clean nested Music/Artist/Album tree")
+
+    # 6. Unknown mass-storage device: default to FLAT. One-level folders are
     #    recognised by both flat-scan and recursive players, so it is the safe
     #    universal choice; a nested tree breaks the flat scanners.
     return Capability(
@@ -134,10 +176,11 @@ def video_profile(device, capability: "Capability"):
     return None
 
 
-def resolve(device, profile: dict | None = None) -> Capability:
+def resolve(device, profile: dict | None = None,
+            sd_mode: bool = False) -> Capability:
     """Auto-classify *device*, then apply any ``transport``/``layout`` override
     from a saved device profile."""
-    cap = classify(device)
+    cap = classify(device, sd_mode=sd_mode)
     if not profile:
         return cap
     over_transport = profile.get("transport")

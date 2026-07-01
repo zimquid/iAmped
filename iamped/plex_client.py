@@ -102,8 +102,35 @@ def account_servers(account: MyPlexAccount) -> list:
 
 
 def connect_resource(resource, timeout: int = 10) -> PlexServer:
-    """Connect using Plex's preferred local/remote/relay URL ordering."""
-    return resource.connect(timeout=timeout)
+    """Connect to a Plex server, strongly preferring a direct LAN address.
+
+    plexapi's ``resource.connect()`` races every advertised connection in
+    parallel and keeps the first that answers — which can be the plex.tv
+    *relay* (an internet round-trip through Plex's servers) even when the
+    machine is on the same subnet. For metadata that's merely slower; for
+    syncing thousands of FLACs it's the difference between LAN speed and
+    trickling through the internet for hours. So try the local, non-relay
+    connections by their plain-http LAN address first, and only fall back to
+    plexapi's ordering (remote / relay) if none respond."""
+    conns = list(getattr(resource, "connections", []) or [])
+    token = resource.accessToken
+    session = getattr(getattr(resource, "_server", None), "_session", None)
+    # local & non-relay first, then any non-relay; relay is the last resort.
+    ordered = sorted(
+        conns,
+        key=lambda c: (0 if getattr(c, "local", False) else 1,
+                       1 if getattr(c, "relay", False) else 0))
+    for c in ordered:
+        if getattr(c, "relay", False):
+            continue                       # never actively choose the relay
+        for url in (getattr(c, "httpuri", None), getattr(c, "uri", None)):
+            if not url:
+                continue
+            try:
+                return PlexServer(url, token, session=session, timeout=timeout)
+            except Exception:              # unreachable address — try the next
+                continue
+    return resource.connect(timeout=timeout)   # nothing local; let plexapi pick
 
 
 def server_info(server: PlexServer) -> dict:
