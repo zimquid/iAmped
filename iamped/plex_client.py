@@ -160,34 +160,92 @@ def track_to_meta(track) -> Optional[TrackMeta]:
     )
 
 
+def _xml_int(el, attr) -> Optional[int]:
+    v = el.get(attr)
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
+
+
+def _elem_to_meta(el) -> Optional[TrackMeta]:
+    """Build a TrackMeta straight from a <Track> XML element of a section
+    listing. This skips plexapi's per-object construction (which is ~30x slower
+    over a large library) and, unlike plexapi's Track class, actually reads
+    ``parentYear`` — so the album year is preserved instead of dropped."""
+    media = el.find("Media")
+    part = media.find("Part") if media is not None else None
+    if media is None or part is None:
+        return None
+    year = _xml_int(el, "parentYear")
+    if year is None:
+        year = _xml_int(el, "year")
+    rating = el.get("userRating")
+    return TrackMeta(
+        rating_key=str(el.get("ratingKey")),
+        title=el.get("title") or "Unknown",
+        artist=el.get("grandparentTitle") or el.get("originalTitle") or "Unknown Artist",
+        album=el.get("parentTitle") or "Unknown Album",
+        album_artist=el.get("grandparentTitle") or "Unknown Artist",
+        genre="",  # genres require an extra fetch; filled lazily elsewhere if needed
+        year=year,
+        track_number=_xml_int(el, "index"),
+        disc_number=_xml_int(el, "parentIndex"),
+        duration_ms=_xml_int(el, "duration") or 0,
+        view_count=_xml_int(el, "viewCount") or 0,
+        user_rating=float(rating) if rating not in (None, "") else None,
+        last_viewed_at=_xml_int(el, "lastViewedAt"),
+        container=(part.get("container") or media.get("container") or "").lower(),
+        codec=(media.get("audioCodec") or "").lower(),
+        bitrate=_xml_int(media, "bitrate"),
+        file_size=_xml_int(part, "size") or 0,
+        part_key=part.get("key") or "",
+        server_file=part.get("file") or "",
+        album_key=str(el.get("parentRatingKey") or ""),
+        album_thumb=el.get("parentThumb") or "",
+    )
+
+
 def iter_tracks(server: PlexServer, section_title: str,
                 progress=None) -> Iterator[TrackMeta]:
-    """Yield every track in a music section. `progress(done, total)` optional."""
+    """Yield every track in a music section. `progress(done, total)` optional.
+
+    Pages the section's ``/all`` endpoint and parses the XML directly rather than
+    materializing a plexapi Track per row — building 17k Track objects took
+    minutes; parsing the same XML takes seconds.
+    """
     section = server.library.section(section_title)
+    ekey = f"/library/sections/{section.key}/all"
     done = 0
     total = None
-    page_size = 200
+    page_size = 500
 
     while True:
-        page = section.searchTracks(
-            container_start=done,
-            container_size=page_size,
-            maxresults=page_size,
+        data = server.query(
+            ekey,
+            params={"type": 10},   # 10 = track
+            headers={
+                "X-Plex-Container-Start": str(done),
+                "X-Plex-Container-Size": str(page_size),
+            },
         )
         if total is None:
-            total = getattr(page, "totalSize", None) or len(page)
+            total = _xml_int(data, "totalSize") or _xml_int(data, "size") or 0
             if progress:
                 progress(done, total)
-        if not page:
+        rows = [el for el in data if el.tag == "Track"]
+        if not rows:
             break
-        for track in page:
-            meta = track_to_meta(track)
+        for el in rows:
+            meta = _elem_to_meta(el)
             done += 1
-            if progress and (done % 50 == 0 or done == total):
+            if progress and (done % 200 == 0 or done == total):
                 progress(done, total)
             if meta:
                 yield meta
-        if total is not None and done >= total:
+        if total and done >= total:
             break
 
 
