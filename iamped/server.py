@@ -81,7 +81,8 @@ def _expire_oauth_logins() -> None:
 def start_job(target, *args) -> str:
     jid = uuid.uuid4().hex[:12]
     job = {"status": "running", "phase": "starting", "done": 0, "total": 0,
-           "message": "", "result": None, "error": None}
+           "message": "", "result": None, "error": None, "code": None,
+           "detail": None}
     JOBS[jid] = job
     if args and isinstance(args[-1], dict):
         job["device_path"] = args[-1].get("device_path")
@@ -93,6 +94,9 @@ def start_job(target, *args) -> str:
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             job["status"] = "error"
             job["error"] = str(exc)
+            job["code"] = getattr(exc, "code", None)      # e.g. pending_transaction
+            job["detail"] = {"completed": getattr(exc, "completed", None)} \
+                if getattr(exc, "code", None) else None
             job["trace"] = traceback.format_exc()
     threading.Thread(target=runner, daemon=True).start()
     return jid
@@ -106,16 +110,23 @@ def _ext_for(track: dict) -> str:
     return e or ".mp3"
 
 
-def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
-                fmt: str, bitrate_k: int | None = None):
+def _materialize(server, lib: Library, track: dict, transcode_lossless: bool,
+                 fmt: str, bitrate_k: int | None = None):
     """Ensure a local audio file exists in the device's target format. Returns
-    (local_path, ext_with_dot). `fmt` is 'aac' (iPod) or 'mp3' (USB)."""
+    (local_path, ext_with_dot, download_secs, transcode_secs). `fmt` is 'aac'
+    (iPod) or 'mp3' (USB). A source already in a device-playable format at an
+    acceptable bitrate is passed through untouched (no ffmpeg) — see
+    ``filler.should_transcode``; only lossless (FLAC/ALAC) or over-bitrate
+    sources are re-encoded."""
     cache = config.load()["cache_dir"]
     rk = track["rating_key"]
     orig_ext = _ext_for(track)
     orig = os.path.join(cache, f"{rk}{orig_ext}")
+    dl_s = 0.0
     if not (os.path.exists(orig) and os.path.getsize(orig) > 0):
+        t0 = time.perf_counter()
         plex_client.download_part(server, track["part_key"], orig)
+        dl_s = time.perf_counter() - t0
         lib.set_cached(rk, orig, os.path.getsize(orig))
 
     if filler.should_transcode(
@@ -124,13 +135,52 @@ def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
         output_base = os.path.join(
             cache, f"{rk}.{fmt}.{bitrate_k or 0}k")
         out = output_base + ext
+        tx_s = 0.0
         if not (os.path.exists(out) and os.path.getsize(out) > 0):
+            t0 = time.perf_counter()
             try:
                 transcode(orig, output_base, fmt, bitrate_k)
             except Exception:
-                return orig, orig_ext          # fall back to the original
-        return out, ext
-    return orig, orig_ext
+                return orig, orig_ext, dl_s, 0.0   # fall back to the original
+            tx_s = time.perf_counter() - t0
+        return out, ext, dl_s, tx_s
+    return orig, orig_ext, dl_s, 0.0               # passthrough — no re-encode
+
+
+def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
+                fmt: str, bitrate_k: int | None = None):
+    """(local_path, ext_with_dot) — thin wrapper over :func:`_materialize`."""
+    path, ext, _dl, _tx = _materialize(
+        server, lib, track, transcode_lossless, fmt, bitrate_k)
+    return path, ext
+
+
+def _sync_timing_note(timing: dict, n: int, workers: int) -> str:
+    """Summarize where a sync spent its time — turns 'it's slow' into a
+    diagnosis. Download/transcode are wall-clock summed across worker threads
+    (so they exceed real elapsed time by ~the worker count); device write is
+    serial and real. Whichever dwarfs the others is the true bottleneck:
+    download → the Plex link, transcode → CPU/ffmpeg, device → the iPod/USB bus.
+    Returned so it can ride along in the sync result the UI shows; also logged
+    to stdout for a terminal run."""
+    mb = timing["bytes"] / (1024 * 1024)
+    dl, tx, dev = timing["download"], timing["transcode"], timing["device"]
+    dl_mbps = (mb / dl) if dl else 0.0
+    note = (
+        f"{n} tracks via {workers} workers — "
+        f"download {dl:.0f}s ({dl_mbps:.1f} MB/s aggregate), "
+        f"transcode {tx:.0f}s, device write {dev:.0f}s, {mb:.0f} MB")
+    print(f"[sync] {note}", flush=True)
+    return note
+
+
+def _fmt_bytes(n: int) -> str:
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
 
 
 def _resolve_capability(params: dict):
@@ -150,11 +200,12 @@ def _resolve_capability(params: dict):
                    capabilities.TRANSPORT_IPOD)}
     path = params.get("device_path")
     busloc = params.get("mtp_busloc")
+    sd_on = bool(config.load().get("sd_card_enabled"))
     try:
         for dev in list_devices(include_raw=False):
             if (dev.mountpoint and dev.mountpoint == path) or \
                     (busloc and dev.mtp_busloc == busloc):
-                return capabilities.resolve(dev, override)
+                return capabilities.resolve(dev, override, sd_mode=sd_on)
     except Exception:  # noqa: BLE001 - detection must never break a sync
         pass
     # Device not enumerable (unmounted, or called before a scan): honour an
@@ -395,6 +446,8 @@ def _build_library_job(job, section: str):
     lib.replace_playlists(pls)
     job["result"] = {"tracks": count, "playlists": len(pls)}
     job["message"] = f"Cached {count} tracks and {len(pls)} playlists."
+    # Preserve the cache across app rebuilds so this slow sync isn't repeated.
+    config.mirror_library_to_stable()
 
 
 def _sync_job_inner(job, params):
@@ -470,16 +523,24 @@ def _sync_job_inner(job, params):
     want_artwork = bool(params.get("sync_artwork", True))
     # Downloading from Plex and transcoding are the slow, independent parts; the
     # actual copy onto the iPod/USB must stay serial (the iTunesDB and file tree
-    # aren't written concurrently). So prefetch materialization in a small thread
-    # pool and consume the results in order — the network/CPU work for track N+k
-    # overlaps the device write for track N, which is what made the old
-    # one-at-a-time loop slower than iTunes.
+    # aren't written concurrently). So prefetch materialization in a thread pool
+    # and consume the results in order — the network/CPU work for track N+k
+    # overlaps the device write for track N.
+    #
+    # Two separate pools: a wide one for the heavy download+transcode work,
+    # sized to the CPU (ffmpeg and downloads both release the GIL, so one job
+    # per core keeps every core busy), and a small dedicated one for cover art.
+    # Art must NOT share the audio pool — it's submitted after the audio jobs,
+    # so it would queue behind all of them and stall the serial writer, which
+    # blocks on each track's art before it can copy.
     from concurrent.futures import ThreadPoolExecutor
 
-    workers = max(1, min(4, len(remaining)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    workers = max(1, min(len(remaining), max(4, os.cpu_count() or 4)))
+    timing = {"download": 0.0, "transcode": 0.0, "device": 0.0, "bytes": 0}
+    with ThreadPoolExecutor(max_workers=workers) as pool, \
+            ThreadPoolExecutor(max_workers=4) as art_pool:
         futures = [pool.submit(
-            materialize, server, lib, tr, tl, fmt, bitrate_k)
+            _materialize, server, lib, tr, tl, fmt, bitrate_k)
                    for tr in remaining]
         album_futures = {}
         art_futures = []
@@ -490,17 +551,24 @@ def _sync_job_inner(job, params):
             album_id = artwork.album_identity(tr)
             future = album_futures.get(album_id)
             if future is None:
-                future = pool.submit(artwork.materialize, server, tr)
+                future = art_pool.submit(artwork.materialize, server, tr)
                 album_futures[album_id] = future
             art_futures.append(future)
         base_done = job["done"]
         for i, tr in enumerate(remaining):
-            src, ext = futures[i].result()
+            src, ext, dl_s, tx_s = futures[i].result()
+            timing["download"] += dl_s
+            timing["transcode"] += tx_s
             art_path = art_futures[i].result() if art_futures[i] else None
+            t0 = time.perf_counter()
             record = backend.add_track(tr, src, ext, art_path)
+            timing["device"] += time.perf_counter() - t0
+            timing["bytes"] += int(record.get("size") or 0)
             device_state.record_completed(path, dtype, tx, str(tr["rating_key"]), record)
             job["done"] = base_done + i + 1
             job["message"] = f"{tr.get('artist','')} – {tr.get('title','')}"
+    timing_note = _sync_timing_note(timing, len(remaining), workers) \
+        if remaining else ""
     job["done"] = len(tracks)
 
     job["phase"] = "playlists"
@@ -513,6 +581,11 @@ def _sync_job_inner(job, params):
     tx["status"] = "metadata"
     device_state.checkpoint(path, dtype, tx)
     backend.finalize()
+    # Sweep files the freshly-written database doesn't reference — junk from
+    # interrupted or older-build syncs that the iPod counts as "Other" and that
+    # would otherwise eat capacity forever. Safe: every real file (ours and
+    # foreign) is staged into the DB by import_existing/add_track above.
+    swept = backend.sweep_orphans() if is_ipod else {"removed": 0, "freed_bytes": 0}
     removed = device_state.finish_cleanup(path, dtype, tx)
     updated = len(diff["update_keys"])
     added = len(tracks) - updated
@@ -530,13 +603,19 @@ def _sync_job_inner(job, params):
         "resumed": resumed,
         "backup": backup,
         "artwork": want_artwork,
+        "timing": timing_note,
+        "orphans_removed": swept["removed"],
+        "orphans_freed_bytes": swept["freed_bytes"],
     }
     job["message"] = (
         f"Added {added} new track(s)"
         + (f", updated {updated}" if updated else "")
         + (f", preserved {carried} already on the device" if carried else "")
         + (f", removed {removed + recovered} stale track(s)" if removed + recovered else "")
-        + f" → {carried + len(tracks)} total on {params['device_path']}.")
+        + (f", reclaimed {_fmt_bytes(swept['freed_bytes'])} of 'Other' junk"
+           if swept["removed"] else "")
+        + f" → {carried + len(tracks)} total on {params['device_path']}."
+        + (f"  ⏱ {timing_note}." if timing_note else ""))
 
 
 def _sync_job(job, params):
@@ -1388,13 +1467,21 @@ def api_volumes():
     # (a user-triggered "scan for MTP players"), never on the hot poll path.
     from .devices import capabilities, list_devices
     include_mtp = request.args.get("mtp") in ("1", "true", "yes")
+    # SD-card mode (File → Enable SD card) is a hidden opt-in: without it, plain
+    # cards/drives stay out of the device list. Honour the request flag, else
+    # the saved setting, so a fresh toggle takes effect immediately.
+    sd_on = (request.args.get("sd") in ("1", "true", "yes")
+             or bool(config.load().get("sd_card_enabled")))
     vols = []
     for d in list_devices(include_mtp=include_mtp):
-        cap = capabilities.classify(d)
+        if not sd_on and capabilities.is_plain_volume(d):
+            continue  # hidden until the user enables SD-card mode
+        cap = capabilities.classify(d, sd_mode=sd_on)
         path = d.mountpoint or d.raw_path or d.id
         vols.append({
             "path": path, "name": d.name, "total": d.total, "free": d.free,
-            "is_ipod": d.is_ipod, "fs": d.fs, "mounted": d.mounted,
+            "is_ipod": d.is_ipod, "is_sd": d.is_sd, "fs": d.fs,
+            "mounted": d.mounted,
             "writable": d.writable, "ipod_format": d.ipod_format,
             "ipod_model": d.ipod_model, "ipod_generation": d.ipod_generation,
             "needs_conversion": d.needs_conversion, "raw_path": d.raw_path,
@@ -1685,6 +1772,80 @@ def _remove_ipod_tracks(path: str, name: str, track_ids: set) -> dict:
             except OSError:
                 pass
     return {"removed": len(drop), "freed_bytes": freed}
+
+
+def _reclaim_ipod_orphans(path: str, name: str) -> dict:
+    """Delete on-device audio the iTunesDB doesn't reference — the "Other" junk
+    that eats capacity. Reads the existing DB (never rewrites it) and removes
+    only files no track points at. Refuses if there's no readable iTunesDB, so a
+    missing/unreadable database can't be mistaken for "everything is an orphan"
+    and wipe the music."""
+    backend = itunesdb.ITunesDBBackend(path, name or "iPod")
+    if backend._existing_db is None:
+        raise RuntimeError(
+            "No iTunesDB found on this iPod — refusing to sweep so real music "
+            "can't be deleted. Do a sync first, then reclaim.")
+    backend.prepare()
+    backend.import_existing()                # stage every track the DB references
+    return backend.sweep_orphans()           # then delete anything unreferenced
+
+
+@app.get("/api/device/sync/pending")
+def api_device_sync_pending():
+    """Report an interrupted transaction that would block a differently-configured
+    sync, so the UI can surface a resume/discard choice up front."""
+    path = request.args.get("device_path", "")
+    dtype = "ipod" if request.args.get("device_type") == "ipod" else "massstorage"
+    if not os.path.isdir(path):
+        return jsonify({"pending": None})
+    return jsonify({"pending": device_state.pending_transaction(path, dtype)})
+
+
+@app.post("/api/device/sync/discard")
+def api_device_sync_discard():
+    """Abandon an interrupted sync: drop the journal that blocks new syncs, then
+    clean up the half-copied files it left behind (on an iPod those are exactly
+    the orphaned 'Other' files, so we sweep them; on mass storage we delete the
+    recorded partial locations). Lets the user start fresh with one click."""
+    p = request.json or {}
+    path = p.get("device_path", "")
+    dtype = "ipod" if p.get("device_type") == "ipod" else "massstorage"
+    if not os.path.isdir(path):
+        return jsonify({"error": "Device path does not exist."}), 400
+    try:
+        with device_management.device_lock(path, dtype):
+            info = device_state.discard_transaction(path, dtype)
+            if dtype == "ipod":
+                swept = _reclaim_ipod_orphans(path, p.get("device_name"))
+            else:
+                rels = {r.get("path") or itunesdb.location_to_relpath(
+                    r.get("location") or "") for r in info["records"]}
+                swept = _remove_massstorage_videos(path, {r for r in rels if r})
+    except Exception as exc:  # noqa: BLE001 - surfaced to UI
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "discarded": info["discarded"],
+                    "interrupted_tracks": info["completed"],
+                    "removed": swept.get("removed", 0),
+                    "freed_bytes": swept.get("freed_bytes", 0)})
+
+
+@app.post("/api/device/reclaim")
+def api_device_reclaim():
+    """One-click cleanup of iPod 'Other' junk (orphaned audio files) without a
+    full sync. iPod-only — mass-storage players have no separate index, so a
+    file present is a file that plays."""
+    p = request.json or {}
+    path = p.get("device_path", "")
+    if p.get("device_type") != "ipod":
+        return jsonify({"error": "Reclaim only applies to iPods."}), 400
+    if not os.path.isdir(path):
+        return jsonify({"error": "Device path does not exist."}), 400
+    try:
+        with device_management.device_lock(path, "ipod"):
+            res = _reclaim_ipod_orphans(path, p.get("device_name"))
+    except Exception as exc:  # noqa: BLE001 - surfaced to UI
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, **res})
 
 
 def _remove_massstorage_videos(path: str, rels: set) -> dict:

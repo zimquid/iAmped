@@ -51,11 +51,11 @@ async function api(path, method = "GET", body = null) {
 function pollJob(jobId, { onProgress, onDone, onError }) {
   const tick = async () => {
     let job;
-    try { job = await api(`/api/job/${jobId}`); } catch (e) { onError(e.message); return; }
+    try { job = await api(`/api/job/${jobId}`); } catch (e) { onError(e.message, {}); return; }
     onProgress(job);
     if (job.status === "running") setTimeout(tick, 600);
     else if (job.status === "done") onDone(job);
-    else onError(job.error || "Job failed");
+    else onError(job.error || "Job failed", job);
   };
   tick();
 }
@@ -64,6 +64,7 @@ const STATE = {
   view: null,          // {type:'library'|'playlist', id, title, source}
   tracks: [],          // current queue
   selected: new Set(),
+  selAnchor: null,     // last-clicked row index, anchors shift-click ranges
   sort: "artist",
   search: "",
   offset: 0, total: 0, loading: false,
@@ -249,6 +250,8 @@ async function loadConfig() {
   STATE.bitrateByFormat.mp3 = Number(cfg.mp3_bitrate_k) || 320;
   STATE.nativePlaybackAvailable = !!cfg.native_playback?.available;
   $("mirror").checked = cfg.mirror !== false;
+  STATE.sdEnabled = !!cfg.sd_card_enabled;
+  updateSdMenuState();
   if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   toggleDeviceType();
@@ -418,6 +421,7 @@ function deviceIconKind(d) {
     if (s.includes("1st")) return "ipod-1";
     return "classic";
   }
+  if (isTruthy(d.is_sd)) return "sd";
   if (s.includes("creative") || s.includes("zen") || s.includes("muvo") || s.includes("nomad")) {
     if (s.includes("vision")) return "creative-vision";
     if (s.includes("micro")) return "creative-micro";
@@ -580,6 +584,23 @@ function deviceIcon(d, size = "sidebar") {
     return wrap(iconSvg(`<rect ${rectAttrs(b)} rx="5" fill="#1d2228" stroke="#0b0d10"/>
       <rect ${rectAttrs(s)} rx="2" fill="#5b86a8"/><rect x="${rr(b.x + b.w * .18)}" y="${rr(b.y + b.h * .72)}" width="${rr(b.w * .39)}" height="${rr(b.h * .14)}" rx="2" fill="#d6d9dc"/><circle cx="${rr(b.x + b.w * .76)}" cy="${rr(b.y + b.h * .79)}" r="${rr(b.w * .12)}" fill="#d6d9dc"/>`));
   }
+  if (kind === "sd") {
+    // A stylised SD card: notched top-left corner and gold contact pins.
+    const b = bodyBox(.72, 44, 74);
+    const notch = rr(b.w * .28);
+    const pinW = b.w * .1, pinY = rr(b.y + b.h * .12), pinH = rr(b.h * .16);
+    const pins = [0, 1, 2, 3, 4].map((i) =>
+      `<rect x="${rr(b.x + b.w * .16 + i * pinW * 1.35)}" y="${pinY}" width="${rr(pinW)}" height="${pinH}" rx="1" fill="#d9b25a"/>`).join("");
+    const d = `M${rr(b.x + Number(notch))} ${rr(b.y)}`
+      + ` H${rr(b.x + b.w - 4)} q4 0 4 4`
+      + ` V${rr(b.y + b.h - 4)} q0 4 -4 4`
+      + ` H${rr(b.x + 4)} q-4 0 -4 -4`
+      + ` V${rr(b.y + Number(notch))} Z`;
+    return wrap(iconSvg(
+      `<path d="${d}" fill="#37506b" stroke="#243247" stroke-width="1"/>
+      ${pins}
+      <rect x="${rr(b.x + b.w * .14)}" y="${rr(b.y + b.h * .42)}" width="${rr(b.w * .72)}" height="${rr(b.h * .34)}" rx="2" fill="#e9eef2"/>`));
+  }
   return wrap(iconSvg(`<rect x="8" y="31" width="48" height="25" rx="4" fill="#d5d8dc" stroke="#6f7780"/>
     <rect x="15" y="37" width="22" height="8" rx="2" fill="#8fb0be"/><circle cx="47" cy="43.5" r="5" fill="#f1f1ee" stroke="#8d9398"/>`));
 }
@@ -633,7 +654,7 @@ function renderSyncChecklist() {
 const selectedPlaylists = () => [...document.querySelectorAll(".pl:checked")].map((c) => c.value);
 
 async function loadDevices() {
-  const vols = await api("/api/volumes");
+  const vols = await api("/api/volumes" + (STATE.sdEnabled ? "?sd=1" : ""));
   const list = $("device-list");
   if (!vols.length) { list.innerHTML = '<div class="src-item disabled">No device detected</div>'; return; }
   const noteSvg = '<svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>';
@@ -956,7 +977,8 @@ function bindRows(rows) {
     row.onclick = (e) => {
       const star = e.target.closest(".row-star");
       if (star) { e.stopPropagation(); rateTrackByKey(idx, Number(star.dataset.star) * 2); return; }
-      selectRow(idx, e.metaKey || e.ctrlKey);
+      if (e.shiftKey) selectRange(idx, e.metaKey || e.ctrlKey);
+      else selectRow(idx, e.metaKey || e.ctrlKey);
     };
     row.ondblclick = () => playIndex(idx);
     row.oncontextmenu = (e) => showCtxMenu(e, idx);
@@ -995,6 +1017,7 @@ function renderTracks() {
   _setFacetMode(false);
   renderAlbumHero(STATE.view?.hero);
   const body = $("browse-body");
+  STATE.selAnchor = null;                // list rebuilt — old anchor is meaningless
   body.innerHTML = STATE.tracks.map((t, i) => rowHtml(t, i)).join("");
   bindRows([...body.querySelectorAll(".songrow")]);
   updateDeviceMusicActions();
@@ -1010,12 +1033,35 @@ function appendTracks(newOnes, startIdx) {
   bindRows([...body.querySelectorAll(".songrow")].slice(before));
   bottomBrowse();
 }
+function _paintSelection() {
+  document.querySelectorAll("#browse-body .songrow").forEach(
+    (r) => r.classList.toggle("selected", STATE.selected.has(r.dataset.rk)));
+  if (STATE.view?.type === "device") updateDeviceMusicActions();
+}
 function selectRow(idx, additive) {
   const rk = STATE.tracks[idx].rating_key;
   if (!additive) STATE.selected.clear();
   if (STATE.selected.has(rk) && additive) STATE.selected.delete(rk); else STATE.selected.add(rk);
-  document.querySelectorAll("#browse-body .songrow").forEach((r) => r.classList.toggle("selected", STATE.selected.has(r.dataset.rk)));
-  if (STATE.view?.type === "device") updateDeviceMusicActions();
+  STATE.selAnchor = idx;              // shift-click ranges anchor on the last click
+  _paintSelection();
+}
+// Shift-click: select the contiguous range from the anchor to idx. Without a
+// modifier this replaces the selection (list convention); with cmd/ctrl it adds
+// the range to what's already selected.
+function selectRange(idx, additive) {
+  const anchor = Number.isInteger(STATE.selAnchor) ? STATE.selAnchor : idx;
+  if (!additive) STATE.selected.clear();
+  const [lo, hi] = anchor <= idx ? [anchor, idx] : [idx, anchor];
+  for (let i = lo; i <= hi; i++) {
+    const t = STATE.tracks[i];
+    if (t) STATE.selected.add(t.rating_key);
+  }
+  _paintSelection();
+}
+function selectAllTracks() {
+  STATE.tracks.forEach((t) => STATE.selected.add(t.rating_key));
+  STATE.selAnchor = 0;
+  _paintSelection();
 }
 
 // ---- device music: remove / ingest action bar ---------------------------
@@ -1033,7 +1079,6 @@ function updateDeviceMusicActions() {
   $("dm-summary").textContent = sel.length
     ? `${sel.length} selected`
     : `${STATE.tracks.length} tracks · ${foreign} not from Plex`;
-  $("btn-dm-remove").disabled = !sel.length;
   $("btn-dm-ingest").disabled = !sel.length;
 }
 function selectForeignDeviceTracks() {
@@ -1053,7 +1098,6 @@ async function removeSelectedDeviceMusic() {
   const sel = _selectedDeviceTracks();
   if (!sel.length) return;
   if (!confirm(`Remove ${sel.length} track(s) from the device? The files are deleted from the device; your Plex library is untouched.`)) return;
-  $("btn-dm-remove").disabled = true;
   try {
     const r = await api("/api/device/music/remove", "POST", _deviceRemoveBody(sel));
     if (r.error) { alert(r.error); return; }
@@ -1197,12 +1241,18 @@ function showCtxMenu(e, idx) {
     { label: "▶  Play", fn: () => playIndex(idx) },
   ];
   if (!onDevice) items.push({ label: `Start radio from “${t.title}”`, fn: () => songRadio(t) });
+  if (STATE.view?.type === "device") {
+    const n = _selectedDeviceTracks().length || 1;
+    items.push({ sep: true });
+    items.push({ label: `Ingest ${n} to Plex…`, fn: () => ingestSelectedDeviceMusic() });
+    items.push({ label: `Remove ${n} from device`, danger: true, fn: () => removeSelectedDeviceMusic() });
+  }
   items.push({ sep: true });
   if (t.artist) items.push({ label: `Show all by ${t.artist}`, fn: () => filterBy(t.artist) });
   if (t.album) items.push({ label: `Show album “${t.album}”`, fn: () => filterBy(t.album) });
   ctxMenu.innerHTML = items.map((it, i) => it.sep
     ? '<div class="ctx-sep"></div>'
-    : `<div class="ctx-item" data-i="${i}">${esc(it.label)}</div>`).join("");
+    : `<div class="ctx-item${it.danger ? " danger" : ""}" data-i="${i}">${esc(it.label)}</div>`).join("");
   ctxMenu.querySelectorAll(".ctx-item").forEach((el) => {
     el.onclick = (ev) => { ev.stopPropagation(); hideCtxMenu(); items[Number(el.dataset.i)].fn(); };
   });
@@ -1767,6 +1817,22 @@ async function selectDevice(el) {
   } catch (_) {}
   updateBitrateControl();
   await loadBackups();
+  checkPendingSync();
+}
+
+// Surface an interrupted prior sync up front (not just after a failed retry) so
+// the stranded files and blocked-sync state are obvious the moment you open the
+// device.
+async function checkPendingSync() {
+  const p = deviceParams();
+  if (!p.device_path) return;
+  try {
+    const r = await api(`/api/device/sync/pending?device_path=${encodeURIComponent(p.device_path)}&device_type=${p.device_type}`);
+    if (!r.pending) return;
+    const s = $("sync-status"); s.className = "status err";
+    s.textContent = `A previous sync of ${r.pending.completed} track(s) was interrupted `
+      + `— those files show as “Other”. Click Sync to resume or discard it.`;
+  } catch (_) {}
 }
 
 function openDeviceInspector() {
@@ -1783,6 +1849,7 @@ function toggleDeviceType() {
   const t = [...document.getElementsByName("dtype")].find((r) => r.checked).value;
   $("ipod-warn").classList.toggle("hidden", t !== "ipod");
   $("devname-wrap").classList.toggle("hidden", t !== "ipod");
+  $("reclaim-tool").classList.toggle("hidden", t !== "ipod");  // iPod-only junk sweep
   updateBitrateControl();
 }
 for (const r of document.getElementsByName("dtype")) r.onchange = toggleDeviceType;
@@ -2080,6 +2147,27 @@ async function matchDeviceFiles() {
       (r.chromaprint_available ? " · Chromaprint available" : " · metadata mode");
   } catch (e) { $("match-status").textContent = e.message; }
 }
+async function reclaimOther() {
+  const p = deviceParams();
+  if (p.device_type !== "ipod") return;
+  if (!confirm("Scan the iPod for orphaned audio files (the “Other” junk "
+    + "left by interrupted or older syncs) and delete them? Files that are in "
+    + "the music database — everything that actually plays — are kept.")) return;
+  const btn = $("btn-reclaim"); btn.disabled = true;
+  $("reclaim-status").textContent = "Scanning…";
+  try {
+    const r = await api("/api/device/reclaim", "POST",
+      { device_path: p.device_path, device_type: "ipod", device_name: p.device_name });
+    if (r.error) { $("reclaim-status").textContent = r.error; return; }
+    const msg = r.removed
+      ? `Removed ${r.removed} junk file(s) — freed ${fmtBytes(r.freed_bytes || 0)}. Eject safely before unplugging.`
+      : "No orphaned files found — nothing to reclaim.";
+    $("reclaim-status").textContent = msg;
+    lcd("iAmped", msg);
+    await loadSidebar();
+  } catch (e) { $("reclaim-status").textContent = e.message; }
+  finally { btn.disabled = false; }
+}
 async function sync() {
   const s = $("sync-status"); s.className = "status"; const p = deviceParams();
   if (!confirm(`${p.mirror ? "Mirror" : "Add"} this selection to ${p.device_path} as a ${p.device_type === "ipod" ? "classic iPod (AAC)" : "USB player (MP3)"}?`)) return;
@@ -2102,9 +2190,45 @@ async function sync() {
         lcd("iAmped", `Synced ${r.tracks_added ?? total} tracks`);
         showSyncProgress(false); $("btn-sync").disabled = false; $("btn-plan").disabled = false;
       },
-      onError: (e) => { s.className = "status err"; s.textContent = e; lcd("iAmped", "Sync failed"); showSyncProgress(false); $("btn-sync").disabled = false; $("btn-plan").disabled = false; },
+      onError: (e, job) => {
+        showSyncProgress(false); $("btn-sync").disabled = false; $("btn-plan").disabled = false;
+        if (job && job.code === "pending_transaction") { offerPendingRecovery(job); return; }
+        s.className = "status err"; s.textContent = e; lcd("iAmped", "Sync failed");
+      },
     });
   } catch (e) { s.className = "status err"; s.textContent = e.message; $("btn-sync").disabled = false; $("btn-plan").disabled = false; }
+}
+
+// A previous sync was interrupted before it wrote the device database. Its
+// copied files are stranded (they show as "Other" on an iPod) and its journal
+// blocks any sync with different settings. Offer the two clean ways out.
+function offerPendingRecovery(job) {
+  const s = $("sync-status");
+  const n = job?.detail?.completed || 0;
+  s.className = "status err";
+  s.textContent = `A previous sync of ${n} track(s) was interrupted before finishing.`;
+  const resume = confirm(
+    `A previous sync of ${n} track(s) was interrupted before it finished writing the iPod's database, `
+    + `so those files aren't showing as music (they count as "Other").\n\n`
+    + `• OK: keep the same selection and re-run Sync to RESUME and finish it.\n`
+    + `• Cancel: DISCARD the interrupted sync — deletes those stranded files to reclaim the space, then start fresh.`);
+  if (resume) { sync(); return; }
+  discardPendingSync();
+}
+
+async function discardPendingSync() {
+  const s = $("sync-status"); const p = deviceParams();
+  s.className = "status"; s.textContent = "Discarding interrupted sync…";
+  try {
+    const r = await api("/api/device/sync/discard", "POST",
+      { device_path: p.device_path, device_type: p.device_type, device_name: p.device_name });
+    if (r.error) { s.className = "status err"; s.textContent = r.error; return; }
+    s.className = "status ok";
+    s.textContent = `Cleared the interrupted sync — removed ${r.removed} stranded file(s), `
+      + `freed ${fmtBytes(r.freed_bytes || 0)}. You can Sync again now.`;
+    lcd("iAmped", `Reclaimed ${fmtBytes(r.freed_bytes || 0)} — ready to sync`);
+    await loadSidebar();
+  } catch (e) { s.className = "status err"; s.textContent = e.message; }
 }
 
 // ---------------------------------------------------------------- readback (device → Plex)
@@ -2167,8 +2291,8 @@ $("btn-save-profile").onclick = saveDeviceProfile;
 $("btn-restore").onclick = restoreBackup;
 $("btn-eject").onclick = () => ejectDevice();
 $("btn-match").onclick = matchDeviceFiles;
+$("btn-reclaim").onclick = reclaimOther;
 $("btn-dm-select-foreign").onclick = selectForeignDeviceTracks;
-$("btn-dm-remove").onclick = removeSelectedDeviceMusic;
 $("btn-dm-ingest").onclick = ingestSelectedDeviceMusic;
 $("btn-save-ingest").onclick = saveIngestDir;
 $("ingest-cancel").onclick = closeIngest;
@@ -2213,10 +2337,25 @@ function updateVisualizerMenuState() {
   };
   Object.entries(checks).forEach(([id, on]) => $(id)?.classList.toggle("on", !!on));
   $("visualizer-dot")?.classList.toggle("active", STATE.visualizerEnabled);
+  updateSdMenuState();
+}
+function updateSdMenuState() {
+  $("menu-check-sd")?.classList.toggle("on", !!STATE.sdEnabled);
+}
+async function toggleSdCard() {
+  STATE.sdEnabled = !STATE.sdEnabled;
+  updateSdMenuState();
+  try { await api("/api/config", "POST", { sd_card_enabled: STATE.sdEnabled }); }
+  catch (e) {}
+  await loadDevices();
+  lcd("iAmped", STATE.sdEnabled
+    ? "SD card mode on — plain cards now show under Devices"
+    : "SD card mode off");
 }
 function handleAppMenuAction(action) {
   if (action === "server") selectPane("pane-plex", document.querySelector('[data-pane="pane-plex"]'));
   else if (action === "music") openLibrary();
+  else if (action === "toggle-sd") { toggleSdCard(); return; }
   else if (action === "toggle-visualizer") toggleVisualizer();
   else if (action === "fullscreen-visualizer") openFullscreenVisualizer();
   else if (action === "viz-bars") setAudioMotionStyle("bars", true);
@@ -2255,7 +2394,24 @@ document.addEventListener("keydown", (e) => {
     if (STATE.visualizerFullscreen) closeFullscreenVisualizer();
     return;
   }
+  // Cmd/Ctrl-A selects every loaded row in the browse list (but let text
+  // fields keep their native select-all).
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey
+      && e.key.toLowerCase() === "a"
+      && !activeEditableTarget(e)
+      && $("pane-browse").classList.contains("active")
+      && STATE.tracks.length) {
+    e.preventDefault(); selectAllTracks(); return;
+  }
   if (activeEditableTarget(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+  // Delete / Backspace removes the selected tracks from the device (the macOS
+  // "delete" key reports as Backspace). Only ever on a device view.
+  if ((e.key === "Delete" || e.key === "Backspace")
+      && STATE.view?.type === "device") {
+    e.preventDefault();
+    if (STATE.selected.size) removeSelectedDeviceMusic();
+    return;
+  }
   if (e.key === " ") {
     e.preventDefault(); togglePlay(); return;
   }

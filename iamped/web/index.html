@@ -14,6 +14,8 @@
     <div class="app-menu-panel hidden" id="file-menu-panel">
       <button class="app-menu-row" data-action="server">Server</button>
       <button class="app-menu-row" data-action="music">Music</button>
+      <div class="app-menu-sep"></div>
+      <button class="app-menu-row" data-action="toggle-sd"><span class="menu-check" id="menu-check-sd"></span>Enable SD card</button>
     </div>
     <div class="app-menu-panel hidden" id="view-menu-panel">
       <button class="app-menu-row" data-action="toggle-visualizer"><span class="menu-check" id="menu-check-mini"></span>Status Visualizer</button>
@@ -169,9 +171,9 @@
           </div>
           <div class="browse-actions device-actions hidden" id="device-music-actions">
             <span id="dm-summary" class="sub"></span>
+            <span class="sub dm-hint">Delete key or right-click to remove</span>
             <button id="btn-dm-select-foreign" title="Select tracks that didn't come from your Plex library">Select foreign</button>
             <button id="btn-dm-ingest" title="Copy selected tracks into your Plex server, then remove them from the device once Plex has them"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M8 1.5l3.5 3.5H9v4H7V5H4.5L8 1.5zM2 11h12v2.5a1 1 0 01-1 1H3a1 1 0 01-1-1V11z"/></svg> Ingest to Plex…</button>
-            <button id="btn-dm-remove" title="Delete selected tracks from the device (Plex is untouched)"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M6 1.5h4a1 1 0 011 1V3h3v1.5H2V3h3v-.5a1 1 0 011-1zM3.2 6h9.6l-.8 8.2a1.2 1.2 0 01-1.2 1.1H5.2A1.2 1.2 0 014 14.2L3.2 6zm2.8 1.5v6h1v-6zm3 0v6h1v-6z"/></svg> Remove from device</button>
           </div>
         </div>
         <div class="album-hero hidden" id="album-hero">
@@ -322,6 +324,11 @@
                 <b>Library matching</b>
                 <button id="btn-match">Match files without Plex IDs</button>
                 <span class="muted" id="match-status"></span>
+              </div>
+              <div id="reclaim-tool">
+                <b>Reclaim space</b>
+                <button id="btn-reclaim" title="Delete orphaned audio files the iPod counts as “Other” — leftovers from interrupted or older syncs that aren’t in the music database">Remove “Other” junk files</button>
+                <span class="muted" id="reclaim-status"></span>
               </div>
               <div>
                 <b>Ingest folder</b>

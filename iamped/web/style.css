@@ -539,7 +539,10 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
 .ctx .ctx-item { padding: 5px 12px; border-radius: 4px; cursor: pointer; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
 .ctx .ctx-item:hover { background: #2f73da; color: #fff; }
+.ctx .ctx-item.danger { color: #c0392b; }
+.ctx .ctx-item.danger:hover { background: #c0392b; color: #fff; }
 .ctx .ctx-sep { height: 1px; margin: 4px 6px; background: #e0e0e0; }
+.device-actions .dm-hint { color: #999; font-size: 11px; }
 
 /* sync review */
 .review-actions { display: flex; align-items: center; gap: 14px; margin-top: 12px; }

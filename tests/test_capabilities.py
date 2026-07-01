@@ -6,7 +6,8 @@ import unittest
 
 from iamped.devices.capabilities import (LAYOUT_FLAT, LAYOUT_NESTED,
                                          TRANSPORT_IPOD, TRANSPORT_MTP,
-                                         TRANSPORT_UMS, classify, resolve)
+                                         TRANSPORT_UMS, classify,
+                                         is_plain_volume, resolve)
 from iamped.devices.model import Device
 from iamped.sync.massstorage import MassStorageBackend
 
@@ -132,6 +133,52 @@ class MigrationTests(unittest.TestCase):
             backend = MassStorageBackend(root, layout="flat")
             new_record = backend._migrate_record(record)
             self.assertEqual(new_record["path"], old_rel)
+
+
+class SdCardModeTests(unittest.TestCase):
+    def _card(self):
+        return dev(name="UNTITLED", model="", mountpoint="/Volumes/CARD",
+                   mounted=True)
+
+    def test_plain_card_detected(self):
+        self.assertTrue(is_plain_volume(self._card()))
+
+    def test_ipod_is_not_plain(self):
+        self.assertFalse(is_plain_volume(
+            dev(name="IPOD", is_ipod=True, mountpoint="/x", mounted=True)))
+
+    def test_known_player_is_not_plain(self):
+        self.assertFalse(is_plain_volume(
+            dev(name="NO NAME", model="MuVo TX FM", mountpoint="/x",
+                mounted=True)))
+
+    def test_unmounted_is_not_plain(self):
+        self.assertFalse(is_plain_volume(dev(name="CARD", mountpoint="/x")))
+
+    def test_sd_off_stays_flat(self):
+        card = self._card()
+        cap = classify(card, sd_mode=False)
+        self.assertEqual(cap.layout, LAYOUT_FLAT)
+        self.assertFalse(card.is_sd)
+
+    def test_sd_on_uses_nested_and_flags_card(self):
+        card = self._card()
+        cap = classify(card, sd_mode=True)
+        self.assertEqual(cap.transport, TRANSPORT_UMS)
+        self.assertEqual(cap.layout, LAYOUT_NESTED)
+        self.assertTrue(card.is_sd)
+
+    def test_sd_on_does_not_override_flat_scanner(self):
+        # A recognised flat-scan player keeps its required flat layout even in
+        # SD mode — its marker wins over the generic-card branch.
+        cap = classify(dev(name="NO NAME", model="MuVo TX FM",
+                           mountpoint="/x", mounted=True), sd_mode=True)
+        self.assertEqual(cap.layout, LAYOUT_FLAT)
+
+    def test_resolve_passes_sd_mode(self):
+        card = self._card()
+        cap = resolve(card, None, sd_mode=True)
+        self.assertEqual(cap.layout, LAYOUT_NESTED)
 
 
 if __name__ == "__main__":

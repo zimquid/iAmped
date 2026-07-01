@@ -120,6 +120,49 @@ def plan_hash(device_type: str, desired_keys: list[str], params: dict) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+class PendingTransactionError(RuntimeError):
+    """A prior sync was interrupted and a new one with *different* settings was
+    requested. Carries a machine-readable ``code`` and the interrupted count so
+    the UI can offer a clean "resume or discard" choice instead of a dead end."""
+    code = "pending_transaction"
+
+    def __init__(self, message: str, completed: int = 0, created_at: int = 0):
+        super().__init__(message)
+        self.completed = completed
+        self.created_at = created_at
+
+
+def pending_transaction(device_path: str, device_type: str) -> dict | None:
+    """Describe an unfinished transaction blocking new syncs, or None. A
+    ``cleanup``-status journal is self-healing (recover_cleanup finishes it) so
+    it isn't reported as a blocker."""
+    prior = read_json(journal_path(device_path, device_type))
+    if not prior or prior.get("status") not in {"copying", "metadata"}:
+        return None
+    return {
+        "status": prior.get("status"),
+        "completed": len(prior.get("completed", {})),
+        "created_at": int(prior.get("created_at") or 0),
+        "plan_hash": prior.get("plan_hash"),
+    }
+
+
+def discard_transaction(device_path: str, device_type: str) -> dict:
+    """Abandon an interrupted transaction: delete the journal so new syncs are
+    unblocked. Returns the completed records (whose files, never written into
+    the device database, are the "Other" junk the caller then sweeps) plus a
+    summary. Idempotent — a missing journal returns zero counts."""
+    path = journal_path(device_path, device_type)
+    prior = read_json(path) or {}
+    completed = list((prior.get("completed") or {}).values())
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return {"discarded": bool(prior), "completed": len(completed),
+            "records": completed, "status": prior.get("status")}
+
+
 def start_or_resume(device_path: str, device_type: str, digest: str,
                     removals: list[dict]) -> tuple[dict, bool]:
     """Return a matching unfinished transaction or create a new one."""
@@ -130,9 +173,11 @@ def start_or_resume(device_path: str, device_type: str, digest: str,
         return prior, True
 
     if prior and prior.get("status") in {"copying", "metadata"}:
-        raise RuntimeError(
-            "An interrupted sync with different settings is still pending. "
-            "Restore the previous selection and run Sync again to resume it.")
+        raise PendingTransactionError(
+            "A previous sync was interrupted before it finished. Resume it by "
+            "syncing the same selection again, or discard it to start fresh.",
+            completed=len(prior.get("completed", {})),
+            created_at=int(prior.get("created_at") or 0))
 
     tx = {
         "version": STATE_VERSION,
