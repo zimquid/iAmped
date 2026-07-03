@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from iamped import server as server_module
+from iamped.api import auth as auth_module
 
 
 class FakeLogin:
@@ -36,7 +37,7 @@ class PlexOAuthRoutesTest(unittest.TestCase):
     def setUp(self):
         server_module.app.config.update(TESTING=True)
         self.client = server_module.app.test_client()
-        server_module.PLEX_OAUTH.clear()
+        auth_module.PLEX_OAUTH.clear()
         server_module._state["server"] = None
         self.cfg = {
             "plex_baseurl": "",
@@ -65,24 +66,24 @@ class PlexOAuthRoutesTest(unittest.TestCase):
         resource = FakeResource("server-1", "Music Server")
 
         with (
-            patch.object(server_module.config, "load", self.config_load),
-            patch.object(server_module.config, "save", self.config_save),
-            patch.object(server_module.plex_client, "start_oauth",
+            patch.object(auth_module.config, "load", self.config_load),
+            patch.object(auth_module.config, "save", self.config_save),
+            patch.object(auth_module.plex_client, "start_oauth",
                          return_value=login),
-            patch.object(server_module.webbrowser, "open"),
-            patch.object(server_module.plex_client, "oauth_account",
+            patch.object(auth_module.webbrowser, "open"),
+            patch.object(auth_module.plex_client, "oauth_account",
                          return_value=object()),
-            patch.object(server_module.plex_client, "account_servers",
+            patch.object(auth_module.plex_client, "account_servers",
                          return_value=[resource]),
-            patch.object(server_module.plex_client, "connect_resource",
+            patch.object(auth_module.plex_client, "connect_resource",
                          return_value=FakeServer()),
-            patch.object(server_module.plex_client, "server_info",
+            patch.object(auth_module.plex_client, "server_info",
                          return_value={
                              "name": "Music Server",
                              "version": "1.41",
                              "platform": "Linux",
                          }),
-            patch.object(server_module.plex_client, "music_sections",
+            patch.object(auth_module.plex_client, "music_sections",
                          return_value=["Music"]),
         ):
             started = self.client.post("/api/plex/oauth/start")
@@ -112,7 +113,7 @@ class PlexOAuthRoutesTest(unittest.TestCase):
                              "https://plex.example:32400")
             self.assertEqual(self.cfg["plex_token"], "server-token")
             self.assertEqual(self.cfg["music_section"], "Music")
-            self.assertNotIn(login_id, server_module.PLEX_OAUTH)
+            self.assertNotIn(login_id, auth_module.PLEX_OAUTH)
 
 
 if __name__ == "__main__":

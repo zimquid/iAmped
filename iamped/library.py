@@ -40,6 +40,21 @@ CREATE TABLE IF NOT EXISTS local_playlist_items (
     playlist_id INTEGER, rating_key TEXT, position INTEGER,
     PRIMARY KEY (playlist_id, position)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY, value TEXT
+);
+CREATE TABLE IF NOT EXISTS podcasts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT UNIQUE, title TEXT, author TEXT, image TEXT,
+    added INTEGER, last_checked INTEGER
+);
+CREATE TABLE IF NOT EXISTS podcast_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    podcast_id INTEGER, guid TEXT, title TEXT, url TEXT,
+    pub_date INTEGER, duration_ms INTEGER, size INTEGER,
+    played INTEGER DEFAULT 0, downloaded_path TEXT,
+    UNIQUE (podcast_id, guid)
+);
 CREATE INDEX IF NOT EXISTS idx_tracks_views ON tracks(view_count DESC);
 CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(user_rating DESC);
 """
@@ -68,11 +83,57 @@ class Library:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         with self._conn() as c:
+            # WAL lets the UI keep reading while a build/sync writes, and makes
+            # bulk upserts noticeably faster. Persistent — set once per file.
+            c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
             existing = {r["name"] for r in c.execute("PRAGMA table_info(tracks)")}
             for name in ("album_key", "album_thumb", "artist_thumb"):
                 if name not in existing:
                     c.execute(f"ALTER TABLE tracks ADD COLUMN {name} TEXT")
+            self._fts = self._ensure_fts(c)
+
+    @staticmethod
+    def _ensure_fts(c) -> bool:
+        """Full-text search over title/artist/album — LIKE '%…%' scans the whole
+        table per keystroke, which drags at 50k+ tracks. External-content FTS5
+        kept in lockstep by triggers; returns False (and search falls back to
+        LIKE) on SQLite builds without the FTS5 module."""
+        try:
+            c.executescript("""
+CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+    title, artist, album, content='tracks', content_rowid='rowid');
+CREATE TRIGGER IF NOT EXISTS tracks_ai AFTER INSERT ON tracks BEGIN
+    INSERT INTO tracks_fts(rowid, title, artist, album)
+    VALUES (new.rowid, new.title, new.artist, new.album);
+END;
+CREATE TRIGGER IF NOT EXISTS tracks_ad AFTER DELETE ON tracks BEGIN
+    INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album)
+    VALUES ('delete', old.rowid, old.title, old.artist, old.album);
+END;
+CREATE TRIGGER IF NOT EXISTS tracks_au AFTER UPDATE ON tracks BEGIN
+    INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album)
+    VALUES ('delete', old.rowid, old.title, old.artist, old.album);
+    INSERT INTO tracks_fts(rowid, title, artist, album)
+    VALUES (new.rowid, new.title, new.artist, new.album);
+END;
+""")
+            # backfill once for databases that predate the index
+            n_fts = c.execute("SELECT COUNT(*) n FROM tracks_fts").fetchone()["n"]
+            n_tracks = c.execute("SELECT COUNT(*) n FROM tracks").fetchone()["n"]
+            if n_fts != n_tracks:
+                c.execute("INSERT INTO tracks_fts(tracks_fts) VALUES ('rebuild')")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    @staticmethod
+    def _fts_query(search: str) -> str:
+        """Turn free text into a prefix-match FTS5 query ("dark si" finds
+        Dark Side …). Terms are quoted so feed titles with quotes/operators
+        can't break the query syntax."""
+        terms = [t.replace('"', '""') for t in search.split() if t]
+        return " ".join(f'"{t}"*' for t in terms)
 
     @contextmanager
     def _conn(self):
@@ -115,6 +176,33 @@ class Library:
                     [(pl.plex_id, rk, i) for i, rk in enumerate(pl.item_keys)],
                 )
         return len(playlists)
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        with self._conn() as c:
+            row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._conn() as c:
+            c.execute("INSERT INTO meta VALUES (?,?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (key, str(value)))
+
+    def track_count(self) -> int:
+        with self._conn() as c:
+            return c.execute("SELECT COUNT(*) n FROM tracks").fetchone()["n"]
+
+    def prune_missing(self, keep_keys: Iterable[str]) -> int:
+        """Delete tracks not in keep_keys — call after a *full* rebuild so
+        tracks removed from Plex don't linger in the local catalog forever."""
+        with self._conn() as c:
+            c.execute("CREATE TEMP TABLE keep (rating_key TEXT PRIMARY KEY)")
+            c.executemany("INSERT OR IGNORE INTO keep VALUES (?)",
+                          [(str(k),) for k in keep_keys])
+            cur = c.execute(
+                "DELETE FROM tracks WHERE rating_key NOT IN (SELECT rating_key FROM keep)")
+            c.execute("DROP TABLE keep")
+        return cur.rowcount
 
     def set_cached(self, rating_key: str, path: Optional[str], size: Optional[int]):
         with self._conn() as c:
@@ -192,8 +280,14 @@ class Library:
         order = BROWSE_ORDER.get(sort, BROWSE_ORDER["artist"])
         where, params = [], []
         if search:
-            where.append("(title LIKE ? OR artist LIKE ? OR album LIKE ?)")
-            params += [f"%{search}%"] * 3
+            fts = self._fts_query(search) if getattr(self, "_fts", False) else ""
+            if fts:
+                where.append("rowid IN (SELECT rowid FROM tracks_fts "
+                             "WHERE tracks_fts MATCH ?)")
+                params.append(fts)
+            else:
+                where.append("(title LIKE ? OR artist LIKE ? OR album LIKE ?)")
+                params += [f"%{search}%"] * 3
         if artist:
             where.append("artist = ? COLLATE NOCASE"); params.append(artist)
         if album:
@@ -315,6 +409,82 @@ class Library:
         if str(pid).startswith("local:"):
             return self.local_playlist_track_keys(int(str(pid).split(":", 1)[1]))
         return self.playlist_track_keys(pid)
+
+    # ---- podcasts ---------------------------------------------------------
+    def add_podcast(self, url: str, title: str, author: str, image: str,
+                    added: int) -> int:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO podcasts (url, title, author, image, added, last_checked) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET "
+                "title=excluded.title, author=excluded.author, image=excluded.image",
+                (url, title, author, image, added, added))
+            row = c.execute("SELECT id FROM podcasts WHERE url=?", (url,)).fetchone()
+        return row["id"]
+
+    def remove_podcast(self, pid: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM podcasts WHERE id=?", (pid,))
+            c.execute("DELETE FROM podcast_episodes WHERE podcast_id=?", (pid,))
+
+    def podcasts(self) -> list[dict]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT p.*, "
+                "(SELECT COUNT(*) FROM podcast_episodes e WHERE e.podcast_id=p.id) episodes, "
+                "(SELECT COUNT(*) FROM podcast_episodes e "
+                " WHERE e.podcast_id=p.id AND e.played=0) unplayed "
+                "FROM podcasts p ORDER BY p.title COLLATE NOCASE").fetchall()]
+
+    def upsert_episodes(self, podcast_id: int, episodes: list[dict]) -> int:
+        """Insert new feed items; existing rows keep played/downloaded state."""
+        fresh = 0
+        with self._conn() as c:
+            for e in episodes:
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO podcast_episodes "
+                    "(podcast_id, guid, title, url, pub_date, duration_ms, size) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (podcast_id, e["guid"], e["title"], e["url"],
+                     e.get("pub_date") or 0, e.get("duration_ms") or 0,
+                     e.get("size") or 0))
+                fresh += cur.rowcount
+            c.execute("UPDATE podcasts SET last_checked=strftime('%s','now') "
+                      "WHERE id=?", (podcast_id,))
+        return fresh
+
+    def episodes(self, podcast_id: int, limit: int | None = None,
+                 unplayed_only: bool = False) -> list[dict]:
+        sql = ("SELECT * FROM podcast_episodes WHERE podcast_id=? "
+               + ("AND played=0 " if unplayed_only else "")
+               + "ORDER BY pub_date DESC")
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(sql, (podcast_id,)).fetchall()]
+
+    def get_episodes(self, ids: list[int]) -> list[dict]:
+        if not ids:
+            return []
+        with self._conn() as c:
+            q = (f"SELECT * FROM podcast_episodes "
+                 f"WHERE id IN ({','.join('?' * len(ids))})")
+            rows = {r["id"]: dict(r) for r in c.execute(q, ids)}
+        return [rows[i] for i in ids if i in rows]
+
+    def set_episode_downloaded(self, eid: int, path: str | None,
+                               size: int | None) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE podcast_episodes SET downloaded_path=?, "
+                      "size=COALESCE(?, size) WHERE id=?", (path, size, eid))
+
+    def mark_episodes_played(self, ids: list[int], played: bool = True) -> None:
+        if not ids:
+            return
+        with self._conn() as c:
+            c.execute(f"UPDATE podcast_episodes SET played=? "
+                      f"WHERE id IN ({','.join('?' * len(ids))})",
+                      [1 if played else 0] + list(ids))
 
     # ---- device → library writeback -------------------------------------
     def add_local_plays(self, rating_key: str, n: int,

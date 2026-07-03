@@ -391,6 +391,7 @@ class ITunesDBBackend:
         self._preserved_playlists: list[tuple[str, list[int]]] = []
         self._album_ids: dict[tuple[str, str], int] = {}
         self._next_id = 1
+        self._artwork_error: str | None = None
         self._existing_db: bytes | None = None
         db_path = os.path.join(self.itunes, "iTunesDB")
         try:
@@ -872,7 +873,20 @@ class ITunesDBBackend:
     def finalize(self) -> None:
         if any(e.art_path for e in self._entries):
             from . import ipod_artwork
-            ipod_artwork.write(self.root, self._generation, self._entries)
+            try:
+                ipod_artwork.write(self.root, self._generation, self._entries)
+            except Exception as exc:
+                # Artwork is cosmetic; writing it must NEVER prevent the
+                # iTunesDB from being written. If it did (e.g. an unparseable
+                # existing ArtworkDB failing validation), the audio files would
+                # already be on disk but no track would appear in the iPod menus
+                # and the space would show up as "Other". Degrade to no-artwork:
+                # drop every artwork reference so the iTunesDB we write below has
+                # no dangling mhii links, then carry on.
+                for e in self._entries:
+                    e.track.pop("_artwork_id", None)
+                    e.track.pop("_artwork_size", None)
+                self._artwork_error = str(exc)
         db = self._build_db()
         self.self_test(db)
         path = os.path.join(self.itunes, "iTunesDB")

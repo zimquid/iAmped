@@ -8,11 +8,21 @@ from unittest.mock import patch
 from PIL import Image
 from mutagen.id3 import ID3
 
-from iamped import device_management, server
+from iamped import device_management
+from iamped.api import syncing as server
 from iamped.devices import usbdetect
 from iamped.sync import device_state, ipod_artwork
 from iamped.sync.itunesdb import ITunesDBBackend, read_tracks_full
 from iamped.sync.massstorage import MassStorageBackend
+
+
+class _ArtEntry:
+    """Minimal stand-in for itunesdb._Entry, enough to drive ipod_artwork."""
+    def __init__(self, track_id, art_path):
+        self.track_id = track_id
+        self.track = {"artist": "Artist", "album": f"Album{track_id}",
+                      "dbid": track_id}
+        self.art_path = art_path
 
 
 def audio_track(key="1"):
@@ -82,6 +92,47 @@ class DeviceFeatureTests(unittest.TestCase):
             self.assertEqual(
                 ipod_artwork.validate(td),
                 {"datasets": 3, "images": 1, "thumbnails": 4})
+
+    def test_corrupt_artworkdb_never_blocks_music(self):
+        # A device carrying an ArtworkDB our validator rejects must still get a
+        # complete iTunesDB: artwork is cosmetic, and if a failed art write
+        # aborts finalize the copied audio ends up on disk with no track record
+        # (the "Other" bucket) and never appears in the iPod's Music menu.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source.m4a"
+            source.write_bytes(b"audio")
+            cover = root / "cover.jpg"
+            Image.new("RGB", (320, 320), (10, 200, 90)).save(cover, "JPEG")
+            artdir = root / "iPod_Control/Artwork"
+            artdir.mkdir(parents=True)
+            # Seed a *structurally parseable but invalid* ArtworkDB, matching the
+            # corruption seen on hardware: records that _parse_existing happily
+            # returns but whose thumbnail pointer fails validate(). Build a real
+            # one, then break the inner 'mhni' magic so validation rejects it.
+            seed = ipod_artwork.write(
+                td, "iPod nano (1st generation)",
+                [_ArtEntry(1, str(cover))])
+            self.assertEqual(seed["artwork"], 1)
+            db_bytes = (artdir / "ArtworkDB").read_bytes()
+            self.assertIn(b"mhni", db_bytes)
+            (artdir / "ArtworkDB").write_bytes(db_bytes.replace(b"mhni", b"XXXX"))
+            with self.assertRaises(Exception):
+                ipod_artwork.validate(td)
+
+            backend = ITunesDBBackend(td, "Nano")
+            backend._generation = "iPod nano (1st generation)"
+            backend.prepare()
+            backend.add_track(audio_track("a"), str(source), ".m4a", str(cover))
+            backend.finalize()
+
+            rows = read_tracks_full(
+                (root / "iPod_Control/iTunes/iTunesDB").read_bytes())
+            self.assertEqual(len(rows), 1)             # music is registered
+            self.assertEqual(rows[0]["mediatype"], 1)  # filed as audio, not Other
+            # The corrupt ArtworkDB was rebuilt into something valid, not carried
+            # forward (which would re-fail on every future sync).
+            ipod_artwork.validate(td)
 
     def test_backup_restore_and_device_profile(self):
         with tempfile.TemporaryDirectory() as td:

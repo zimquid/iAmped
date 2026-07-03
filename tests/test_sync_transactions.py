@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from iamped import server
+from iamped import server  # noqa: F401  (app import side-effects)
+from iamped.api import syncing as server_sync
 from iamped.sync import device_state, hash58
 from iamped.sync.itunesdb import ITunesDBBackend, read_manifest, read_tracks_full
 from iamped.sync.massstorage import MassStorageBackend
@@ -72,9 +73,9 @@ class DeviceTransactionTest(unittest.TestCase):
                 "transcode_lossless": False,
                 "max_tracks": 2,
             }
-            with patch.object(server, "_lib", return_value=FakeLibrary()), \
-                    patch.object(server, "free_bytes", return_value=100):
-                diff = server._device_plan(params)
+            with patch.object(server_sync, "_lib", return_value=FakeLibrary()), \
+                    patch.object(server_sync, "free_bytes", return_value=100):
+                diff = server_sync._device_plan(params)
 
             self.assertEqual(set(diff["keep_tracks"]), {"keep"})
             self.assertEqual([t["rating_key"] for t in diff["add_tracks"]], ["new"])
@@ -117,11 +118,11 @@ class DeviceTransactionTest(unittest.TestCase):
                 "max_tracks": 2,
             }
             job = {}
-            with patch.object(server, "_lib", return_value=FakeLibrary()), \
-                    patch.object(server, "get_server", return_value=object()), \
-                    patch.object(server, "_materialize",
+            with patch.object(server_sync, "_lib", return_value=FakeLibrary()), \
+                    patch.object(server_sync, "get_server", return_value=object()), \
+                    patch.object(server_sync, "_materialize",
                                  return_value=(str(source), ".mp3", 0.0, 0.0)):
-                server._sync_job(job, params)
+                server_sync._sync_job(job, params)
 
             manifest = device_state.read_manifest(tmp, "massstorage")
             self.assertEqual(
@@ -168,9 +169,9 @@ class DeviceTransactionTest(unittest.TestCase):
                 "transcode_lossless": False,
                 "max_tracks": 1,
             }
-            with patch.object(server, "_lib", return_value=FakeLibrary()), \
-                    patch.object(server, "free_bytes", return_value=100):
-                diff = server._device_plan(params)
+            with patch.object(server_sync, "_lib", return_value=FakeLibrary()), \
+                    patch.object(server_sync, "free_bytes", return_value=100):
+                diff = server_sync._device_plan(params)
 
             self.assertEqual(diff["update_keys"], {"changed"})
             self.assertEqual(len(diff["add_tracks"]), 1)

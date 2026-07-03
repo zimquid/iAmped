@@ -289,11 +289,33 @@ def write(device_path: str, generation: str, entries) -> dict:
     db_path = directory / "ArtworkDB"
     existing, mhla, mhlf, max_id = _parse_existing(db_path)
 
+    # If the existing ArtworkDB doesn't pass our own validator, it was written
+    # by a tool (or an older/broken iAmped) whose record layout we can't safely
+    # round-trip. Carrying those records forward makes *every* write re-fail
+    # validation and abort the whole sync — which leaves the copied audio on the
+    # device with no iTunesDB entry (the "Other" bucket). Rebuild the artwork
+    # database from scratch instead: drop the stale records, truncate the ITHMB
+    # thumbnail files (nothing references their old bytes any more), and clear
+    # each entry's artwork id so the iTunesDB we write next has no dangling
+    # mhii links.
+    rebuild = False
+    if existing:
+        try:
+            validate(device_path)
+        except Exception:
+            rebuild = True
+    if rebuild:
+        existing, mhla, mhlf, max_id = [], None, None, 99
+        for entry in entries:
+            entry.track.pop("_artwork_id", None)
+            entry.track.pop("_artwork_size", None)
+
     handles = {}
     offsets = {}
+    open_mode = "wb" if rebuild else "ab"
     for fmt in formats:
         path = directory / f"F{fmt.format_id}_1.ithmb"
-        handle = open(path, "ab")
+        handle = open(path, open_mode)
         handles[fmt.format_id] = handle
         offsets[fmt.format_id] = handle.tell()
 

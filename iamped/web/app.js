@@ -96,6 +96,7 @@ const STATE = {
   nativePlaybackDuration: 0,
   nativePlaybackTimer: null,
   nativePlaybackLastPosition: 0,
+  nativeNextIndex: -1,   // queue index handed to mpv for gapless auto-advance
   bitrateByFormat: { aac: 256, mp3: 320 },
   manualPlaylistIds: null,
   transferMaxTracks: null,
@@ -118,6 +119,9 @@ function activeEditableTarget(e) {
 }
 
 function updateTransportModes() {
+  // shuffle/repeat changes alter what "next" means — re-queue mpv's gapless
+  // up-next to match (harmless no-op when nothing is playing natively)
+  if (typeof queueUpNext === "function" && STATE.nativePlaybackActive) queueUpNext();
   $("t-shuffle").classList.toggle("active", STATE.shuffle);
   $("t-repeat").classList.toggle("active", STATE.repeat !== "off");
   $("repeat-one").classList.toggle("hidden", STATE.repeat !== "one");
@@ -252,6 +256,8 @@ async function loadConfig() {
   $("mirror").checked = cfg.mirror !== false;
   STATE.sdEnabled = !!cfg.sd_card_enabled;
   updateSdMenuState();
+  STATE.autosyncEnabled = cfg.autosync_enabled !== false;
+  updateAutosyncMenuState();
   if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   toggleDeviceType();
@@ -362,10 +368,11 @@ async function refreshStats() {
     <div class="stat"><b>${st.cached.toLocaleString()}</b><span>files downloaded</span></div>`;
 }
 
-async function buildLibrary() {
+async function buildLibrary(mode = "auto") {
   const s = $("build-status"); $("btn-build").disabled = true; s.className = "status"; s.textContent = "Starting…";
   try {
-    const { job } = await api("/api/library/build", "POST", { section: $("section").value });
+    const { job } = await api("/api/library/build", "POST",
+      { section: $("section").value || undefined, mode });
     pollJob(job, {
       onProgress: (j) => {
         const count = j.total
@@ -1386,7 +1393,18 @@ async function pollNativePlayback() {
       return;
     }
     STATE.nativePlaybackPaused = status.state !== "playing";
-    STATE.nativePlaybackPosition = Number(status.position || 0);
+    const pos = Number(status.position || 0);
+    // Gapless auto-advance: mpv rolled into the queued next track (position
+    // snapped back to ~0 from near the end) — move the UI along without
+    // restarting playback.
+    const prevMax = STATE.nativePlaybackLastPosition;
+    const dur = trackDuration();
+    if (status.state === "playing" && STATE.nativeNextIndex >= 0
+        && prevMax > 5 && pos + 2 < prevMax && dur > 0 && dur - prevMax <= 10) {
+      advanceUiToQueuedNext(pos);
+      return;
+    }
+    STATE.nativePlaybackPosition = pos;
     STATE.nativePlaybackDuration = Number(status.duration || 0) || trackDuration();
     STATE.nativePlaybackLastPosition = Math.max(STATE.nativePlaybackLastPosition, STATE.nativePlaybackPosition);
     updatePlaybackDisplay();
@@ -1424,6 +1442,7 @@ async function startNativePlayback(t, start = 0) {
     STATE.nativePlaybackDuration = Number(status.duration || 0) || trackDuration();
     STATE.nativePlaybackLastPosition = start;
     startNativePlaybackTimer();
+    queueUpNext();
     return true;
   } catch (e) {
     STATE.nativePlaybackAvailable = false;
@@ -1433,6 +1452,39 @@ async function startNativePlayback(t, start = 0) {
     return false;
   }
 }
+async function queueUpNext() {
+  // Hand mpv the up-next track so the transition is gapless (album playback
+  // without the classic between-track hiccup). Safe no-op in browser playback.
+  if (!STATE.nativePlaybackActive) return;
+  const i = nextIndex(true);
+  STATE.nativeNextIndex = i;
+  if (i < 0) return;
+  const t = STATE.tracks[i];
+  if (!t || isDeviceTrack(t)) { STATE.nativeNextIndex = -1; return; }
+  try { await api("/api/playback/next", "POST", { rating_key: t.rating_key }); }
+  catch (_) { STATE.nativeNextIndex = -1; }
+}
+
+function advanceUiToQueuedNext(pos) {
+  const i = STATE.nativeNextIndex;
+  STATE.nativeNextIndex = -1;
+  if (i < 0 || i >= STATE.tracks.length) return;
+  if (STATE.playing >= 0 && STATE.playing !== i) STATE.playHistory.push(STATE.playing);
+  STATE.playing = i;
+  const t = STATE.tracks[i];
+  STATE.scrobble = { session: STATE.scrobble.session + 1, posted: false };
+  STATE.playbackOffset = 0;
+  STATE.playbackRecoveryKey = t.rating_key;
+  STATE.playbackRecoveryCount = 0;
+  STATE.nativePlaybackPosition = pos;
+  STATE.nativePlaybackLastPosition = pos;
+  STATE.nativePlaybackDuration = (Number(t.duration_ms) || 0) / 1000;
+  lcd(t.title, `${t.artist} — ${t.album}`);
+  updateNowPlaying(); updateFullscreenTitle(); prepareVisualizerTrack();
+  updatePlaybackDisplay(pos); setPlayIcon(true); renderTracks();
+  queueUpNext();
+}
+
 function nextIndex(autoAdvance = false) {
   if (!STATE.tracks.length) return -1;
   if (autoAdvance && STATE.repeat === "one" && STATE.playing >= 0) return STATE.playing;
@@ -1814,7 +1866,11 @@ async function selectDevice(el) {
     if (profile.sync_artwork != null) $("sync-artwork").checked = profile.sync_artwork;
     if (profile.mirror != null) $("mirror").checked = profile.mirror;
     if (profile.name) $("device-name").value = profile.name;
+    $("autosync").checked = !!profile.autosync;
+    $("auto-readback").checked = profile.auto_readback !== false;
   } catch (_) {}
+  $("otg-list").innerHTML = ""; $("otg-status").textContent = "";
+  $("otg-tool").classList.toggle("hidden", !isIpod);
   updateBitrateControl();
   await loadBackups();
   checkPendingSync();
@@ -1850,6 +1906,7 @@ function toggleDeviceType() {
   $("ipod-warn").classList.toggle("hidden", t !== "ipod");
   $("devname-wrap").classList.toggle("hidden", t !== "ipod");
   $("reclaim-tool").classList.toggle("hidden", t !== "ipod");  // iPod-only junk sweep
+  $("otg-tool").classList.toggle("hidden", t !== "ipod");      // iPod-only OTG lists
   updateBitrateControl();
 }
 for (const r of document.getElementsByName("dtype")) r.onchange = toggleDeviceType;
@@ -2099,8 +2156,12 @@ async function saveDeviceProfile() {
   const p = deviceParams();
   if (!p.device_path) return;
   p.name = $("device-name").value.trim() || STATE.currentDevice?.name || "Device";
+  p.autosync = $("autosync").checked;
+  p.auto_readback = $("auto-readback").checked;
   await api("/api/device/profile", "PUT", p);
-  lcd("iAmped", "Device profile saved");
+  lcd("iAmped", p.autosync
+    ? "Device profile saved — it will sync automatically when plugged in"
+    : "Device profile saved");
 }
 
 async function loadBackups() {
@@ -2278,13 +2339,181 @@ async function applyReadback() {
   } catch (e) { s.className = "status err"; s.textContent = e.message; $("btn-readback-apply").disabled = false; $("btn-readback").disabled = false; }
 }
 
+// ---------------------------------------------------------------- On-The-Go
+async function checkOtg() {
+  const p = deviceParams();
+  if (!p.device_path) return;
+  const s = $("otg-status"); s.textContent = "Reading…";
+  try {
+    const r = await api(`/api/device/otg?device_path=${encodeURIComponent(p.device_path)}`);
+    const pls = r.playlists || [];
+    s.textContent = pls.length ? "" : "No On-The-Go playlists on this iPod.";
+    $("otg-list").innerHTML = pls.map((pl) => `
+      <div class="otg-row" data-file="${esc(pl.file)}" style="margin:4px 0;">
+        <b>${esc(pl.title)}</b>
+        <span class="muted">${plural(pl.matched, "track")}${pl.unmatched ? ` · ${pl.unmatched} unmatched` : ""}</span>
+        <button class="otg-import">Save as playlist</button>
+        <label style="margin-left:6px;"><input type="checkbox" class="otg-plex"> also in Plex</label>
+      </div>`).join("");
+    $("otg-list").querySelectorAll(".otg-import").forEach((b) => {
+      b.onclick = async () => {
+        const row = b.closest(".otg-row");
+        b.disabled = true;
+        try {
+          const res = await api("/api/device/otg/import", "POST", {
+            device_path: p.device_path, file: row.dataset.file,
+            to_plex: row.querySelector(".otg-plex").checked, clear: true,
+          });
+          s.textContent = `Saved “${res.title}” (${plural(res.count, "track")})`
+            + (res.plex_playlist ? " — also created in Plex" : res.plex_error ? ` — Plex: ${res.plex_error}` : "");
+          row.remove();
+          await loadSidebar();
+        } catch (e) { s.textContent = e.message; b.disabled = false; }
+      };
+    });
+  } catch (e) { s.textContent = e.message; }
+}
+
+// ---------------------------------------------------------------- podcasts
+async function loadPodcasts() {
+  try {
+    const r = await api("/api/podcasts");
+    const pods = r.podcasts || [];
+    $("pod-list").innerHTML = pods.length ? pods.map((p) => `
+      <div class="pod-row" data-id="${p.id}" style="display:flex; align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid #e6e6e6;">
+        <div style="flex:1; min-width:0;">
+          <b>${esc(p.title)}</b>
+          <div class="muted" style="font-size:11px;">${plural(p.episodes, "episode")} · ${p.unplayed} unplayed${p.author ? ` · ${esc(p.author)}` : ""}</div>
+        </div>
+        <button class="pod-episodes">Episodes</button>
+        <button class="pod-remove" title="Unsubscribe">×</button>
+      </div>
+      <div class="pod-eps hidden" data-for="${p.id}" style="margin:0 0 6px 12px;"></div>`).join("")
+      : '<div class="muted">No subscriptions yet — paste an RSS URL above.</div>';
+    $("pod-list").querySelectorAll(".pod-remove").forEach((b) => {
+      b.onclick = async () => {
+        const id = b.closest(".pod-row").dataset.id;
+        if (!confirm("Unsubscribe from this podcast?")) return;
+        await api(`/api/podcast/${id}`, "DELETE");
+        loadPodcasts();
+      };
+    });
+    $("pod-list").querySelectorAll(".pod-episodes").forEach((b) => {
+      b.onclick = async () => {
+        const id = b.closest(".pod-row").dataset.id;
+        const box = $("pod-list").querySelector(`.pod-eps[data-for="${id}"]`);
+        if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+        const r2 = await api(`/api/podcast/${id}/episodes?limit=25`);
+        box.innerHTML = (r2.episodes || []).map((e) => `
+          <div class="muted" style="font-size:11px; padding:2px 0;">
+            ${e.played ? "☑" : "☐"} ${esc(e.title)}
+            ${e.duration_ms ? ` · ${fmtDur(e.duration_ms)}` : ""}
+            <a href="#" class="pod-toggle" data-id="${e.id}" data-played="${e.played ? 0 : 1}">${e.played ? "mark unplayed" : "mark played"}</a>
+          </div>`).join("") || '<div class="muted">No episodes.</div>';
+        box.classList.remove("hidden");
+        box.querySelectorAll(".pod-toggle").forEach((a) => {
+          a.onclick = async (ev) => {
+            ev.preventDefault();
+            await api("/api/podcast/episodes/played", "POST",
+              { ids: [Number(a.dataset.id)], played: a.dataset.played === "1" });
+            loadPodcasts();
+          };
+        });
+      };
+    });
+  } catch (e) { $("pod-status").textContent = e.message; }
+}
+async function addPodcast() {
+  const url = $("pod-url").value.trim();
+  const s = $("pod-status");
+  if (!url) { s.textContent = "Enter a feed URL."; return; }
+  s.className = "status"; s.textContent = "Reading feed…";
+  try {
+    const r = await api("/api/podcasts", "POST", { url });
+    s.className = "status ok";
+    s.textContent = `Subscribed to “${r.title}” (${plural(r.total_episodes, "episode")}).`;
+    $("pod-url").value = "";
+    loadPodcasts();
+  } catch (e) { s.className = "status err"; s.textContent = e.message; }
+}
+async function refreshPodcasts() {
+  const s = $("pod-status"); s.className = "status"; s.textContent = "Refreshing feeds…";
+  try {
+    const { job } = await api("/api/podcasts/refresh", "POST", {});
+    pollJob(job, {
+      onProgress: (j) => { s.textContent = j.message || "Refreshing…"; },
+      onDone: (j) => { s.className = "status ok"; s.textContent = j.message; loadPodcasts(); },
+      onError: (e) => { s.className = "status err"; s.textContent = e; },
+    });
+  } catch (e) { s.className = "status err"; s.textContent = e.message; }
+}
+async function syncPodcasts() {
+  const s = $("pod-sync-status");
+  const d = STATE.currentDevice;
+  if (!d?.path) { s.className = "status err"; s.textContent = "Pick a device under Devices first."; return; }
+  s.className = "status"; s.textContent = `Syncing to ${d.name}…`;
+  try {
+    const { job } = await api("/api/podcasts/sync", "POST", {
+      device_path: d.path, device_type: d.type, device_name: d.name,
+      per_show: Number($("pod-per-show").value) || 3,
+      unplayed_only: $("pod-unplayed").checked,
+    });
+    pollJob(job, {
+      onProgress: (j) => {
+        s.textContent = j.total ? `${j.message || ""} (${j.done}/${j.total})` : (j.message || "");
+        lcd("Syncing podcasts", j.message || "", j.total ? j.done / j.total : null);
+      },
+      onDone: (j) => { s.className = "status ok"; s.textContent = j.message; lcd("iAmped", j.message); },
+      onError: (e) => { s.className = "status err"; s.textContent = e; lcd("iAmped", "Podcast sync failed"); },
+    });
+  } catch (e) { s.className = "status err"; s.textContent = e.message; }
+}
+
+// ------------------------------------------------------- background jobs
+// Surface work this window didn't start — an autosync kicked off by plugging
+// the iPod in, or the plan-time cache warm-up — so syncs never run invisibly.
+const WATCHED_JOBS = new Set();
+async function pollActiveJobs() {
+  try {
+    const jobs = await api("/api/jobs/active");
+    for (const [jid, job] of Object.entries(jobs)) {
+      if (WATCHED_JOBS.has(jid)) continue;
+      WATCHED_JOBS.add(jid);
+      if (job.kind === "autosync_job") {
+        showSyncProgress(true);
+        pollJob(jid, {
+          onProgress: (j) => setSyncProgress(j.message || "Auto-sync…", j.done, j.total),
+          onDone: (j) => { showSyncProgress(false); lcd("iAmped", j.message || "Auto-sync finished"); loadDevices(); },
+          onError: (e) => { showSyncProgress(false); lcd("Auto-sync failed", e); },
+        });
+        lcd("Auto-sync", job.message || "Device connected — syncing");
+      } else if (job.kind === "prefetch_job") {
+        pollJob(jid, {
+          onProgress: (j) => {
+            if (j.total) $("bottom-info").textContent =
+              `Preparing sync in the background… ${j.done}/${j.total} track(s) cached`;
+          },
+          onDone: () => { if ($("pane-device").classList.contains("open")) bottomDevice(); },
+          onError: () => {},
+        });
+      }
+    }
+  } catch (_) {}
+}
+setInterval(pollActiveJobs, 5000);
+
 // ---------------------------------------------------------------- wire up
 $("btn-connect").onclick = connect;
 $("btn-plex-oauth").onclick = startPlexOAuth;
 $("btn-oauth-server").onclick = finishPlexOAuth;
 $("btn-readback").onclick = readbackPreview;
 $("btn-readback-apply").onclick = applyReadback;
-$("btn-build").onclick = buildLibrary;
+$("btn-build").onclick = () => buildLibrary("auto");
+$("btn-otg").onclick = checkOtg;
+$("btn-pod-add").onclick = addPodcast;
+$("btn-pod-refresh").onclick = refreshPodcasts;
+$("btn-pod-sync").onclick = syncPodcasts;
+$("src-podcasts").addEventListener("click", loadPodcasts);
 $("btn-plan").onclick = plan;
 $("btn-sync").onclick = sync;
 $("btn-save-profile").onclick = saveDeviceProfile;
@@ -2352,10 +2581,29 @@ async function toggleSdCard() {
     ? "SD card mode on — plain cards now show under Devices"
     : "SD card mode off");
 }
+function updateAutosyncMenuState() {
+  const check = $("menu-check-autosync");
+  if (check) check.textContent = STATE.autosyncEnabled ? "✓" : "";
+}
+async function toggleAutosync() {
+  STATE.autosyncEnabled = !STATE.autosyncEnabled;
+  updateAutosyncMenuState();
+  try { await api("/api/config", "POST", { autosync_enabled: STATE.autosyncEnabled }); }
+  catch (e) {}
+  lcd("iAmped", STATE.autosyncEnabled
+    ? "Auto-sync on — devices with an auto-sync profile sync when plugged in"
+    : "Auto-sync off");
+}
 function handleAppMenuAction(action) {
   if (action === "server") selectPane("pane-plex", document.querySelector('[data-pane="pane-plex"]'));
   else if (action === "music") openLibrary();
   else if (action === "toggle-sd") { toggleSdCard(); return; }
+  else if (action === "toggle-autosync") { toggleAutosync(); return; }
+  else if (action === "rebuild-library") {
+    selectPane("pane-plex", document.querySelector('[data-pane="pane-plex"]'));
+    buildLibrary("full");
+    return;
+  }
   else if (action === "toggle-visualizer") toggleVisualizer();
   else if (action === "fullscreen-visualizer") openFullscreenVisualizer();
   else if (action === "viz-bars") setAudioMotionStyle("bars", true);

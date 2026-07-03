@@ -71,6 +71,8 @@ def save_profile(path: str, dtype: str, values: dict) -> dict:
         "transcode_lossless", "target_bitrate_k",
         "sync_artwork", "mirror", "playlist_ids",
         "transport", "layout",   # override the auto-detected sync mode
+        "autosync",              # sync this profile automatically on connect
+        "auto_readback",         # push device plays/ratings to Plex on connect
     }
     current = all_profiles.get(did, {})
     current.update({k: v for k, v in values.items() if k in allowed})

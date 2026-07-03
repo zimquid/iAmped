@@ -238,24 +238,51 @@ def _elem_to_meta(el) -> Optional[TrackMeta]:
     )
 
 
+def section_track_count(server: PlexServer, section_title: str) -> int:
+    """Total track count of a music section without fetching any rows — a
+    zero-size container request returns just the totalSize attribute. Used to
+    detect Plex-side deletions cheaply before an incremental refresh."""
+    section = server.library.section(section_title)
+    data = server.query(
+        f"/library/sections/{section.key}/all",
+        params={"type": 10},
+        headers={"X-Plex-Container-Start": "0", "X-Plex-Container-Size": "0"},
+    )
+    return _xml_int(data, "totalSize") or _xml_int(data, "size") or 0
+
+
 def iter_tracks(server: PlexServer, section_title: str,
-                progress=None) -> Iterator[TrackMeta]:
+                progress=None,
+                since: Optional[int] = None,
+                since_field: str = "updatedAt") -> Iterator[TrackMeta]:
     """Yield every track in a music section. `progress(done, total)` optional.
 
     Pages the section's ``/all`` endpoint and parses the XML directly rather than
     materializing a plexapi Track per row — building 17k Track objects took
     minutes; parsing the same XML takes seconds.
+
+    ``since`` (server epoch seconds) narrows the listing to tracks whose
+    ``since_field`` is after that moment (Plex's ``>>=`` filter operator),
+    which is what makes an incremental refresh a few-second operation. Plays
+    and ratings do NOT bump ``updatedAt`` on the server — they live in a
+    separate settings table — so a full delta needs three sweeps: updatedAt
+    (metadata edits + new tracks), lastViewedAt (new plays), and lastRatedAt
+    (rating changes). Deletions are invisible to all of them — callers pair
+    this with :func:`section_track_count`.
     """
     section = server.library.section(section_title)
     ekey = f"/library/sections/{section.key}/all"
     done = 0
     total = None
     page_size = 500
+    params: dict = {"type": 10}   # 10 = track
+    if since:
+        params[f"{since_field}>>"] = str(int(since))
 
     while True:
         data = server.query(
             ekey,
-            params={"type": 10},   # 10 = track
+            params=params,
             headers={
                 "X-Plex-Container-Start": str(done),
                 "X-Plex-Container-Size": str(page_size),
@@ -422,6 +449,18 @@ def list_playlists(server: PlexServer) -> list[PlaylistMeta]:
             item_keys=[str(i.ratingKey) for i in items],
         ))
     return out
+
+
+def create_playlist(server: PlexServer, title: str,
+                    rating_keys: list[str]) -> Optional[str]:
+    """Create a regular audio playlist on the Plex server from rating keys
+    (used to ingest an iPod On-The-Go list back into Plex). Returns the new
+    playlist's rating key, or None if no tracks resolved."""
+    items = [t for t in (fetch_track(server, rk) for rk in rating_keys) if t]
+    if not items:
+        return None
+    pl = server.createPlaylist(title, items=items)
+    return str(pl.ratingKey)
 
 
 def fetch_track(server: PlexServer, rating_key: str):
@@ -695,15 +734,31 @@ def set_rating(server: PlexServer, rating_key: str, rating_0_to_10: float) -> No
 
 def download_part(server: PlexServer, part_key: str, dest_path: str,
                   progress=None, chunk: int = 1 << 20) -> str:
-    """Download the original audio file for a track to dest_path."""
+    """Download the original audio file for a track to dest_path.
+
+    Resumable: a leftover ``.part`` from an interrupted run continues with an
+    HTTP Range request instead of starting over — on big FLAC libraries over
+    Wi-Fi that saves re-downloading everything a dropout already delivered.
+    Falls back to a fresh full download when the server ignores the Range.
+    """
     url = server.url(f"{part_key}?download=1", includeToken=True)
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     tmp = dest_path + ".part"
-    with server._session.get(url, stream=True, timeout=60) as r:
+    have = 0
+    try:
+        have = os.path.getsize(tmp)
+    except OSError:
+        pass
+    headers = {"Range": f"bytes={have}-"} if have else {}
+    with server._session.get(url, stream=True, timeout=60,
+                             headers=headers) as r:
         r.raise_for_status()
-        total = int(r.headers.get("Content-Length", 0) or 0)
-        done = 0
-        with open(tmp, "wb") as fh:
+        resumed = have and r.status_code == 206
+        mode = "ab" if resumed else "wb"
+        total = int(r.headers.get("Content-Length", 0) or 0) \
+            + (have if resumed else 0)
+        done = have if resumed else 0
+        with open(tmp, mode) as fh:
             for block in r.iter_content(chunk_size=chunk):
                 if not block:
                     continue

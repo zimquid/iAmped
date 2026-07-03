@@ -69,6 +69,15 @@ class MPVPlayback:
             self._command(["seek", float(start), "absolute", "exact"])
         return self.status()
 
+    def set_next(self, url: str) -> dict[str, Any]:
+        """Queue the next track behind the current one so mpv transitions
+        gaplessly (and prefetches the stream). Replaces any previously queued
+        next entry — call again whenever the up-next changes."""
+        self._ensure_process()
+        self._command(["playlist-clear"])        # keeps the playing entry
+        self._command(["loadfile", url, "append"])
+        return self.status()
+
     def pause(self) -> dict[str, Any]:
         self._ensure_process()
         self._command(["set_property", "pause", True])
@@ -110,6 +119,9 @@ class MPVPlayback:
             "paused": paused,
             "position": float(position or 0),
             "state": "stopped" if idle else ("paused" if paused else "playing"),
+            # which URL is actually playing — after a gapless auto-advance this
+            # is how the UI learns mpv moved on to the queued next track
+            "url": self._get_property("path") or "",
         }
 
     def _ensure_process(self) -> None:
@@ -126,6 +138,8 @@ class MPVPlayback:
                 self._mpv_path() or "mpv",
                 "--no-config",
                 "--idle=yes",
+                "--gapless-audio=yes",
+                "--prefetch-playlist=yes",
                 "--no-video",
                 "--force-window=no",
                 "--terminal=no",

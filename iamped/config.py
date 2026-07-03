@@ -98,6 +98,10 @@ DEFAULTS: dict[str, Any] = {
     "sync_artwork": True,
     "mirror": True,
     "sd_card_enabled": False,   # hidden: surface plain SD cards as sync targets
+    "prefetch_on_plan": True,   # warm the download/transcode cache while the
+                                # user reviews a sync plan
+    "autosync_enabled": True,   # master switch for sync-on-connect (each device
+                                # additionally opts in via its profile)
 }
 
 

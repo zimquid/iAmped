@@ -49,6 +49,32 @@ device screen can restore a prior manifest, database/playlists, removed audio,
 and native iPod artwork. Writes and readback resets use a per-device lock, and
 the device can be safely ejected from the same screen.
 
+### Fast refresh, dock ritual, and cache warm-up
+
+- **Incremental library refresh**: after the first full build, refreshing the
+  library only asks Plex for tracks whose metadata, plays, or ratings changed
+  since the last sweep — seconds instead of minutes on large libraries. A cheap
+  server-side count detects deletions and escalates to a pruning full rebuild
+  automatically (File → Rebuild library forces one).
+- **Auto-sync on connect** (the iTunes dock behavior): enable *Sync
+  automatically when plugged in* on a device profile and plugging the device in
+  runs the whole ritual — device plays/ratings are pushed to Plex, the library
+  is delta-refreshed, and the saved profile syncs. File → Auto-sync connected
+  devices is the master switch.
+- **Plan-time cache warm-up**: while you review a sync preview, iAmped already
+  downloads and transcodes the planned tracks in the background, so clicking
+  Sync mostly just copies files to the device. Interrupted downloads resume
+  with HTTP Range requests instead of restarting.
+- **Podcasts**: subscribe to RSS feeds (sidebar → Podcasts), refresh for new
+  episodes, and sync the latest N per show to any device as a per-show
+  playlist tagged with the Podcast genre.
+- **On-The-Go import**: playlists queued on the iPod's On-The-Go menu can be
+  saved as local or Plex playlists from the device screen (and are cleared
+  from the device afterwards, like iTunes did).
+- **Offline playback**: tracks already in the sync cache play in the app even
+  when Plex is unreachable. mpv-backed playback is gapless — the next queue
+  item is prefetched and handed to mpv before the current track ends.
+
 ### Artwork, profiles, matching, and playback
 
 - Plex album artwork is cached once per album. USB players receive embedded
