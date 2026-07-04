@@ -1,0 +1,94 @@
+name: Release
+
+# Builds the portable app on native runners and attaches the artifacts to a
+# GitHub Release:
+#   macOS   -> iAmped-macOS.zip  (zipped iAmped.app bundle)
+#   Windows -> iAmped-Windows.exe (single self-contained executable)
+#
+# Trigger either way:
+#   * push a version tag        ->  git tag v1.01 && git push origin v1.01
+#   * or run it from the Actions tab (workflow_dispatch) with a tag input.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build/publish (e.g. v1.01)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Single source of truth for the tag across every job.
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # Create the release once, up front, so the parallel build jobs only ever
+  # upload assets (no race creating the same release twice).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$RELEASE_TAG"
+          TITLE="${TAG#v}"   # "v1.01" -> "1.01"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — reusing it."
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target main \
+              --title "$TITLE" \
+              --notes "iAmped $TITLE — portable build. Download the macOS .app (zip) or the Windows .exe below."
+          fi
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: iAmped-macOS.zip
+          - os: windows-latest
+            asset: iAmped-Windows.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python -m PyInstaller --noconfirm build_tools/iamped.spec
+          # ditto preserves the .app bundle structure inside the zip.
+          ditto -c -k --sequesterRsrc --keepParent dist/iAmped.app iAmped-macOS.zip
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -m PyInstaller --noconfirm build_tools/iamped.spec
+          copy dist\iAmped.exe iAmped-Windows.exe
+
+      - name: Upload asset to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" "${{ matrix.asset }}" \
+            --repo "$GITHUB_REPOSITORY" --clobber

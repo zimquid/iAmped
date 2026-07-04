@@ -58,7 +58,7 @@ if IS_MAC:
         info_plist={
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": "1.0.1",
         },
     )
 else:
