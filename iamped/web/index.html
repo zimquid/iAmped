@@ -294,18 +294,21 @@
         </div>
         <label class="check"><input type="checkbox" id="transcode" checked>
           Transcode lossless and higher-bitrate files when needed <span class="muted" id="ffmpeg-note"></span></label>
-        <div class="bitrate-control">
+        <div class="bitrate-control" id="bitrate-control">
           <div class="bitrate-label">
             <label id="bitrate-format">MP3 bitrate</label>
             <button class="info-btn" id="bitrate-info" type="button" title="Bitrate info">i</button>
             <b id="bitrate-value">320 kbps</b>
           </div>
-          <div class="info-popover hidden" id="bitrate-popover">Lower bitrates fit more songs on small devices. iPods use AAC; USB players use MP3. iAmped only transcodes files above the selected preset or lossless files when transcoding is enabled.</div>
+          <div class="info-popover hidden" id="bitrate-popover">Lower bitrates fit more songs on small devices. iPods use AAC; USB players use MP3. Drag the slider all the way to the right for Apple Lossless (ALAC) — exact quality, much larger files. iAmped only transcodes files above the selected preset or lossless files when transcoding is enabled.</div>
+          <div class="bitrate-glow" id="bitrate-glow"></div>
           <input id="bitrate-notch" type="range" min="0" max="5" step="1" value="5">
           <div class="bitrate-ticks" id="bitrate-ticks"></div>
+          <div class="bitrate-note muted hidden" id="aac-quality-note"></div>
         </div>
-        <div class="field hidden" id="ipod-format-field">
-          <label>iPod audio format <span class="muted" id="aac-quality-note"></span></label>
+        <!-- iPod audio format is chosen from the bitrate slider (ALAC = far right);
+             this select stays as the persisted source of truth. -->
+        <div class="field hidden" id="ipod-format-field" hidden>
           <select id="ipod-format">
             <option value="aac">AAC — smaller files, great quality (recommended)</option>
             <option value="alac">Apple Lossless (ALAC) — exact quality, much larger</option>

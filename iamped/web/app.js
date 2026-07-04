@@ -235,7 +235,7 @@ function setVideoProgress(label, frac) {
 // ---- panes --------------------------------------------------------------
 function selectPane(paneId, srcEl) {
   document.querySelectorAll(".content > .pane").forEach((p) => p.classList.toggle("active", p.id === paneId));
-  document.querySelectorAll(".src-item").forEach((s) => s.classList.remove("selected"));
+  document.querySelectorAll(".src-item, .src-subitem").forEach((s) => s.classList.remove("selected"));
   if (srcEl) srcEl.classList.add("selected");
   if (paneId === "pane-browse") bottomBrowse();
   else { $("bottom-info").classList.remove("hidden"); $("capacity").classList.add("hidden"); $("cap-legend").classList.add("hidden"); $("sync-actions").classList.add("hidden"); $("bottom-info").textContent = "—"; }
@@ -260,10 +260,10 @@ async function loadConfig() {
   updateAutosyncMenuState();
   if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
-  toggleDeviceType();
-  if (!cfg.has_ffmpeg) { $("ffmpeg-note").textContent = "(ffmpeg not found — lossless copied as-is, FLAC won't play in-app)"; $("transcode").checked = false; }
   if ($("ipod-format")) $("ipod-format").value = cfg.ipod_format || "aac";
   applyAacQualityNote(cfg);
+  toggleDeviceType();   // builds the bitrate slider — needs ipod-format set first
+  if (!cfg.has_ffmpeg) { $("ffmpeg-note").textContent = "(ffmpeg not found — lossless copied as-is, FLAC won't play in-app)"; $("transcode").checked = false; }
   applyCacheSettings(cfg);
   // The cached library is browsable offline; only build/play/sync need Plex.
   let st = { tracks: 0 };
@@ -942,7 +942,14 @@ function facetArtHtml(item) {
 function renderFacetList(kind) {
   _setBrowseVideoMode(false);
   _setFacetMode(true);
-  const items = STATE.facets[kind] || [];
+  const all = STATE.facets[kind] || [];
+  // Search filters the whole cached facet list, not just what's scrolled into
+  // view — type "eels" and it surfaces even if you never scrolled to it.
+  const q = ($("search").value || "").trim().toLowerCase();
+  const items = q
+    ? all.filter((it) => (it.name || "").toLowerCase().includes(q)
+        || (it.artist || "").toLowerCase().includes(q))
+    : all;
   const body = $("browse-body");
   // Genres are list-only; albums/artists honour the user's list/grid choice.
   const grid = kind !== "genres" && facetViewMode() === "grid";
@@ -952,7 +959,9 @@ function renderFacetList(kind) {
     b.classList.toggle("active", b.dataset.vm === (grid ? "grid" : "list")));
 
   if (!items.length) {
-    body.innerHTML = `<div class="muted" style="padding:14px">No ${facetTitle(kind).toLowerCase()} cached.</div>`;
+    body.innerHTML = q
+      ? `<div class="muted" style="padding:14px">No ${facetTitle(kind).toLowerCase()} match “${esc(q)}”.</div>`
+      : `<div class="muted" style="padding:14px">No ${facetTitle(kind).toLowerCase()} cached.</div>`;
   } else if (grid) {
     const artist = kind === "artists";
     body.innerHTML = `<div class="albumgrid">` + items.map((item, i) => {
@@ -1115,6 +1124,9 @@ function renderTracks() {
   bindRows([...body.querySelectorAll(".songrow")]);
   updateDeviceMusicActions();
   bottomBrowse();
+  if (($("search").value || "").trim()
+      && (STATE.view?.type === "device" || STATE.view?.type === "playlist"))
+    filterVisibleRows();
 }
 // Append a page of rows WITHOUT rebuilding the list, so the scroll position is
 // preserved and the next page can be triggered by continued scrolling.
@@ -1312,10 +1324,33 @@ $("browse-body").onscroll = (e) => {
 let searchTimer;
 $("search").oninput = () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    if (STATE.view?.type === "library") { STATE.search = $("search").value.trim(); STATE.offset = 0; STATE.tracks = []; loadMore(true); }
-  }, 300);
+  searchTimer = setTimeout(applySearch, 300);
 };
+// Route the search box to whatever the current view is showing. The library is
+// searched server-side (it's paged); everything else is already fully loaded in
+// memory, so we filter it client-side rather than only the rows in view.
+function applySearch() {
+  const type = STATE.view?.type;
+  if (type === "library") {
+    STATE.search = $("search").value.trim();
+    STATE.offset = 0; STATE.tracks = []; loadMore(true);
+  } else if (type === "facet") {
+    renderFacetList(STATE.view.kind);
+  } else if (type === "device" || type === "playlist") {
+    filterVisibleRows();
+  }
+}
+// Hide track rows that don't match the search term, keeping row indices intact
+// so selection/playback still line up with STATE.tracks.
+function filterVisibleRows() {
+  const q = ($("search").value || "").trim().toLowerCase();
+  $("browse-body").querySelectorAll(".songrow").forEach((row) => {
+    const t = STATE.tracks[Number(row.dataset.idx)];
+    const hit = !q || !t || [t.title, t.artist, t.album]
+      .some((x) => (x || "").toLowerCase().includes(q));
+    row.classList.toggle("search-hidden", !hit);
+  });
+}
 
 // ---------------------------------------------------------------- context menu
 const ctxMenu = document.createElement("div");
@@ -2003,7 +2038,7 @@ function toggleDeviceType() {
   $("devname-wrap").classList.toggle("hidden", t !== "ipod");
   $("reclaim-tool").classList.toggle("hidden", t !== "ipod");  // iPod-only junk sweep
   $("otg-tool").classList.toggle("hidden", t !== "ipod");      // iPod-only OTG lists
-  if ($("ipod-format-field")) $("ipod-format-field").classList.toggle("hidden", t !== "ipod");
+  // AAC vs ALAC now lives on the bitrate slider; the select stays hidden.
   updateBitrateControl();
 }
 for (const r of document.getElementsByName("dtype")) r.onchange = toggleDeviceType;
@@ -2018,23 +2053,75 @@ function setBitrate(format, bitrate) {
   STATE.bitrateByFormat[format] = closest;
   if (activeFormat() === format) updateBitrateControl();
 }
+// ALAC lives on the far-right of the slider, but only for the iPod (AAC) path —
+// USB players get MP3 with no lossless option.
+function alacOnSlider() { return activeFormat() === "aac"; }
+function alacSelected() {
+  return alacOnSlider() && $("ipod-format") && $("ipod-format").value === "alac";
+}
 function updateBitrateControl() {
   const format = activeFormat();
   const values = BITRATE_PRESETS[format];
-  const current = STATE.bitrateByFormat[format] || values[values.length - 1];
-  const index = Math.max(0, values.indexOf(current));
+  const withAlac = alacOnSlider();
+  const alacIdx = values.length;              // one notch past the top preset
+  const notch = $("bitrate-notch");
+  const control = $("bitrate-control");
   $("bitrate-format").textContent = `${format.toUpperCase()} bitrate`;
-  $("bitrate-value").textContent = `${values[index]} kbps`;
-  $("bitrate-notch").max = String(values.length - 1);
-  $("bitrate-notch").value = String(index);
-  $("bitrate-ticks").innerHTML = values.map((value) => `<span>${value}</span>`).join("");
+  notch.max = String(withAlac ? alacIdx : values.length - 1);
+
+  const ticks = values.map((value) => `<span>${value}</span>`);
+  if (withAlac) ticks.push(`<span class="tick-alac">ALAC</span>`);
+  $("bitrate-ticks").innerHTML = ticks.join("");
+
+  const note = $("aac-quality-note");
+  if (note) note.classList.toggle("hidden", !withAlac);
+
+  if (alacSelected()) {
+    notch.value = String(alacIdx);
+    $("bitrate-value").textContent = "ALAC · Lossless";
+    control.classList.add("alac-selected");
+  } else {
+    const current = STATE.bitrateByFormat[format] || values[values.length - 1];
+    const index = Math.max(0, values.indexOf(current));
+    notch.value = String(index);
+    $("bitrate-value").textContent = `${values[index]} kbps`;
+    control.classList.remove("alac-selected");
+  }
 }
 $("bitrate-notch").oninput = () => {
   const format = activeFormat();
-  const value = BITRATE_PRESETS[format][Number($("bitrate-notch").value)];
-  STATE.bitrateByFormat[format] = value;
-  $("bitrate-value").textContent = `${value} kbps`;
+  const values = BITRATE_PRESETS[format];
+  const idx = Number($("bitrate-notch").value);
+  const control = $("bitrate-control");
+  if (alacOnSlider() && idx >= values.length) {
+    // Dragged past the top preset → Apple Lossless.
+    const wasAlac = control.classList.contains("alac-selected");
+    if ($("ipod-format")) $("ipod-format").value = "alac";
+    $("bitrate-value").textContent = "ALAC · Lossless";
+    control.classList.add("alac-selected");
+    if (!wasAlac) triggerAlacGlow();          // glow once, on arrival
+    saveIpodFormat();
+  } else {
+    const value = values[idx];
+    STATE.bitrateByFormat[format] = value;
+    $("bitrate-value").textContent = `${value} kbps`;
+    if (control.classList.contains("alac-selected")) {
+      control.classList.remove("alac-selected");
+      if ($("ipod-format")) $("ipod-format").value = "aac";
+      saveIpodFormat();
+    }
+  }
 };
+// Sweep a glow up the slider from the ALAC end for a couple of seconds.
+let alacGlowTimer;
+function triggerAlacGlow() {
+  const control = $("bitrate-control");
+  control.classList.remove("alac-glow");
+  void control.offsetWidth;                    // restart the CSS animation
+  control.classList.add("alac-glow");
+  clearTimeout(alacGlowTimer);
+  alacGlowTimer = setTimeout(() => control.classList.remove("alac-glow"), 2400);
+}
 function deviceParams() {
   const t = [...document.getElementsByName("dtype")].find((r) => r.checked).value;
   const p = {
