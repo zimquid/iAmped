@@ -262,12 +262,70 @@ async function loadConfig() {
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   toggleDeviceType();
   if (!cfg.has_ffmpeg) { $("ffmpeg-note").textContent = "(ffmpeg not found — lossless copied as-is, FLAC won't play in-app)"; $("transcode").checked = false; }
+  if ($("ipod-format")) $("ipod-format").value = cfg.ipod_format || "aac";
+  applyAacQualityNote(cfg);
+  applyCacheSettings(cfg);
   // The cached library is browsable offline; only build/play/sync need Plex.
   let st = { tracks: 0 };
   try { st = await api("/api/library/stats"); await refreshStats(); await loadSidebar(); } catch (e) {}
   if (cfg.plex_baseurl && cfg.plex_token) connect();
   if (st.tracks > 0) openLibrary();
 }
+
+// ---- AAC encoder quality + cache settings -------------------------------
+function applyAacQualityNote(cfg) {
+  const note = $("aac-quality-note");
+  if (!note) return;
+  if (cfg.aac_apple_grade) {
+    note.textContent = `(clean AAC via ${cfg.aac_encoder})`;
+    note.classList.remove("warn");
+  } else {
+    note.textContent = "⚠ your ffmpeg has only the native AAC encoder, which can "
+      + "stutter on older iPods — install a build with libfdk_aac, or choose ALAC / MP3";
+    note.classList.add("warn");
+  }
+}
+function cacheStatusText(status) {
+  if (!status) return "";
+  const used = fmtBytes(status.bytes || 0);
+  return status.aggressive
+    ? `${used} cached — aggressive mode (no limit, kept on exit)`
+    : `${used} cached — capped at ${fmtBytes((status.limit_mb || 0) * 1024 * 1024)}, cleared on exit`;
+}
+function applyCacheSettings(cfg) {
+  if ($("cache-limit")) $("cache-limit").value = cfg.cache_limit_mb ?? 3072;
+  if ($("aggressive-cache")) $("aggressive-cache").checked = !!cfg.aggressive_cache;
+  if ($("cache-limit")) $("cache-limit").disabled = !!cfg.aggressive_cache;
+  const note = $("cache-status-note");
+  if (note) note.textContent = cacheStatusText(cfg.cache_status);
+}
+async function refreshCacheStatus() {
+  try { applyCacheSettings(await api("/api/config")); } catch (_) {}
+}
+async function saveCacheSettings() {
+  const limit = Math.max(0, Number($("cache-limit").value) || 0);
+  const aggressive = $("aggressive-cache").checked;
+  $("cache-limit").disabled = aggressive;
+  try { await api("/api/config", "POST", { cache_limit_mb: limit, aggressive_cache: aggressive }); }
+  catch (_) {}
+  refreshCacheStatus();
+}
+async function saveIpodFormat() {
+  try { await api("/api/config", "POST", { ipod_format: $("ipod-format").value }); }
+  catch (_) {}
+}
+async function clearCacheNow() {
+  const s = $("clear-cache-status"); if (s) s.textContent = "Clearing…";
+  try {
+    const r = await api("/api/cache/clear", "POST", {});
+    if (s) s.textContent = `Freed ${fmtBytes(r.freed_bytes || 0)} (${r.removed || 0} files)`;
+  } catch (e) { if (s) s.textContent = "Clear failed"; }
+  refreshCacheStatus();
+}
+if ($("ipod-format")) $("ipod-format").onchange = saveIpodFormat;
+if ($("cache-limit")) $("cache-limit").onchange = saveCacheSettings;
+if ($("aggressive-cache")) $("aggressive-cache").onchange = saveCacheSettings;
+if ($("btn-clear-cache")) $("btn-clear-cache").onclick = clearCacheNow;
 
 async function connect() {
   const s = $("connect-status"); s.className = "status"; s.textContent = "Connecting…";
@@ -660,8 +718,36 @@ function renderSyncChecklist() {
 }
 const selectedPlaylists = () => [...document.querySelectorAll(".pl:checked")].map((c) => c.value);
 
+function deviceSignature(vols) {
+  return vols.map((v) => `${v.path}|${v.is_ipod}|${v.free}`).sort().join("§");
+}
+let DEVICE_POLL = { sig: null, paths: new Set() };
+// Poll the cheap /api/volumes hot path so plugging a device in refreshes the
+// sidebar on its own — no more toggling SD-card mode to make it "look". Only
+// re-renders when the device set actually changes, so it never disturbs hover
+// or selection during steady state. (Backend autosync.py separately watches for
+// connect and fires sync-on-connect for devices with an autosync profile.)
+async function pollDevices() {
+  let vols;
+  try { vols = await api("/api/volumes" + (STATE.sdEnabled ? "?sd=1" : "")); }
+  catch (_) { return; }
+  const sig = deviceSignature(vols);
+  if (sig === DEVICE_POLL.sig) return;
+  const firstRun = DEVICE_POLL.sig === null;
+  const added = vols.filter((v) => !DEVICE_POLL.paths.has(v.path));
+  DEVICE_POLL = { sig, paths: new Set(vols.map((v) => v.path)) };
+  renderDevices(vols);
+  if (!firstRun && added.length) {
+    const v = added[0];
+    lcd("Device connected", v.ipod_model || v.name || v.path);
+  }
+}
 async function loadDevices() {
   const vols = await api("/api/volumes" + (STATE.sdEnabled ? "?sd=1" : ""));
+  DEVICE_POLL = { sig: deviceSignature(vols), paths: new Set(vols.map((v) => v.path)) };
+  renderDevices(vols);
+}
+function renderDevices(vols) {
   const list = $("device-list");
   if (!vols.length) { list.innerHTML = '<div class="src-item disabled">No device detected</div>'; return; }
   const noteSvg = '<svg viewBox="0 0 16 16"><path d="M6 2l8-1v9.2A2.5 2.5 0 1012 11V4L7 4.8V12a2.5 2.5 0 11-1-2z"/></svg>';
@@ -1370,7 +1456,15 @@ function updatePlaybackDisplay(position = playbackPosition()) {
   maybeScrobbleCurrentTrack();
   updateMediaPositionState();
 }
+function deviceStreamUrl(t) {
+  // Tracks that live on the connected device aren't in Plex — stream the file
+  // straight off the mount instead of through the library resolver.
+  const path = STATE.deviceMusic?.path || "";
+  return `/api/device/stream?device_path=${encodeURIComponent(path)}`
+    + `&location=${encodeURIComponent(t._location || "")}`;
+}
 function streamUrl(t, start = 0) {
+  if (isDeviceTrack(t)) return deviceStreamUrl(t);
   const base = `/api/stream/${encodeURIComponent(t.rating_key)}`;
   return start > 0 ? `${base}?start=${encodeURIComponent(start.toFixed(3))}` : base;
 }
@@ -1523,7 +1617,7 @@ async function playIndex(i, opts = {}) {
   STATE.playbackOffset = 0;
   STATE.playbackRecoveryKey = t.rating_key;
   STATE.playbackRecoveryCount = 0;
-  if (STATE.nativePlaybackAvailable) {
+  if (STATE.nativePlaybackAvailable && !isDeviceTrack(t)) {
     const nativeStarted = await startNativePlayback(t);
     if (!nativeStarted) {
       player.src = streamUrl(t);
@@ -1866,6 +1960,8 @@ async function selectDevice(el) {
     if (profile.sync_artwork != null) $("sync-artwork").checked = profile.sync_artwork;
     if (profile.mirror != null) $("mirror").checked = profile.mirror;
     if (profile.name) $("device-name").value = profile.name;
+    if (isIpod && profile.ipod_format && $("ipod-format"))
+      $("ipod-format").value = profile.ipod_format;
     $("autosync").checked = !!profile.autosync;
     $("auto-readback").checked = profile.auto_readback !== false;
   } catch (_) {}
@@ -1907,6 +2003,7 @@ function toggleDeviceType() {
   $("devname-wrap").classList.toggle("hidden", t !== "ipod");
   $("reclaim-tool").classList.toggle("hidden", t !== "ipod");  // iPod-only junk sweep
   $("otg-tool").classList.toggle("hidden", t !== "ipod");      // iPod-only OTG lists
+  if ($("ipod-format-field")) $("ipod-format-field").classList.toggle("hidden", t !== "ipod");
   updateBitrateControl();
 }
 for (const r of document.getElementsByName("dtype")) r.onchange = toggleDeviceType;
@@ -1949,6 +2046,7 @@ function deviceParams() {
     sync_artwork: $("sync-artwork").checked,
     mirror: $("mirror").checked,
   };
+  if (t === "ipod" && $("ipod-format")) p.ipod_format = $("ipod-format").value;
   if (STATE.manualKeys) p.mirror = false;
   if (STATE.manualKeys) p.rating_keys = STATE.manualKeys;
   if (STATE.manualPlaylistIds) {
@@ -2501,6 +2599,7 @@ async function pollActiveJobs() {
   } catch (_) {}
 }
 setInterval(pollActiveJobs, 5000);
+setInterval(pollDevices, 3500);   // auto-detect device connect/disconnect
 
 // ---------------------------------------------------------------- wire up
 $("btn-connect").onclick = connect;
@@ -2964,6 +3063,7 @@ function visualizerTrackKey() {
   return currentTrack()?.rating_key || null;
 }
 function visualizerStreamUrl(t, start = playbackPosition()) {
+  if (isDeviceTrack(t)) return deviceStreamUrl(t);
   const params = new URLSearchParams({ duration: "45" });
   if (start > 0) params.set("start", start.toFixed(3));
   return `/api/stream/${encodeURIComponent(t.rating_key)}?${params.toString()}`;

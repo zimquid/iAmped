@@ -40,6 +40,8 @@ def _profile_sync_params(dev, path: str, dtype: str, profile: dict) -> dict:
     }
     if profile.get("target_bitrate_k"):
         params["target_bitrate_k"] = profile["target_bitrate_k"]
+    if profile.get("ipod_format"):
+        params["ipod_format"] = profile["ipod_format"]
     for key in ("transport", "layout"):
         if profile.get(key):
             params[key] = profile[key]

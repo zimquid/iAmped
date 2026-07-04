@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
 from .. import (config, device_management, ingest, inventory, matcher,
                 readback)
@@ -390,6 +390,40 @@ def api_device_matches():
                             __import__("shutil").which("fpcalc"))})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@bp.get("/api/device/stream")
+def api_device_stream():
+    """Stream an audio file that physically lives on the connected device.
+
+    Tracks read back from an iPod/USB player aren't in Plex, so ``/api/stream``
+    (which resolves against the library) can't serve them — the in-app player
+    would 404. This serves the on-device file straight from the mount, with
+    Range support so the browser ``<audio>`` element can scrub."""
+    path = request.args.get("device_path", "")
+    location = request.args.get("location", "")
+    if not os.path.isdir(path):
+        return jsonify({"error": "Device path does not exist."}), 400
+    if not location:
+        return jsonify({"error": "location is required"}), 400
+    rel = itunesdb.location_to_relpath(location)
+    root = os.path.realpath(path)
+    target = os.path.realpath(os.path.join(root, rel))
+    # Contain the lookup to the device mount — never serve a path that escapes it.
+    if target != root and os.path.commonpath([target, root]) != root:
+        return jsonify({"error": "invalid location"}), 400
+    if not os.path.isfile(target):
+        return jsonify({"error": "File not found on device."}), 404
+    ext = os.path.splitext(target)[1].lstrip(".").lower()
+    mime = ("audio/mp4" if ext in ("m4a", "mp4", "aac", "m4b", "m4p")
+            else "audio/mpeg" if ext == "mp3"
+            else "audio/wav" if ext in ("wav", "aiff", "aif")
+            else f"audio/{ext or 'mpeg'}")
+    resp = send_file(target, mimetype=mime, conditional=True)
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+    return resp
 
 
 @bp.get("/api/device/inventory")

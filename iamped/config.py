@@ -95,6 +95,10 @@ DEFAULTS: dict[str, Any] = {
     "transcode_lossless": True,
     "aac_bitrate_k": 256,
     "mp3_bitrate_k": 320,
+    "ipod_format": "aac",       # iPod audio target: "aac" (lossy) | "alac" (lossless)
+    "cache_limit_mb": 3072,     # LRU-evict the download/transcode cache past this
+    "aggressive_cache": False,  # keep everything for fast re-syncs (no cap, no
+                                # clear-on-exit) at the cost of local disk
     "sync_artwork": True,
     "mirror": True,
     "sd_card_enabled": False,   # hidden: surface plain SD cards as sync targets

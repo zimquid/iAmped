@@ -12,9 +12,19 @@ import sys
 import threading
 import time
 
+from . import cache
 from .server import create_app
 
 HOST = "127.0.0.1"
+
+
+def _on_exit() -> None:
+    """Wipe the transient download/transcode cache on close (no-op in aggressive
+    mode). Best-effort — a failure here must never block shutdown."""
+    try:
+        cache.clear_transient()
+    except Exception:
+        pass
 
 
 def _free_port() -> int:
@@ -30,6 +40,8 @@ def _serve(app, port: int):
 
 
 def main() -> int:
+    import atexit
+    atexit.register(_on_exit)
     app = create_app()
     port = int(os.environ.get("IAMPED_PORT", 0)) or _free_port()
     url = f"http://{HOST}:{port}"

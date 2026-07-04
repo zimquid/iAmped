@@ -80,6 +80,69 @@ def sanitize(name: str, fallback: str = "Unknown", maxlen: int = 80) -> str:
     return (name or fallback)[:maxlen]
 
 
+# Classic iPods (1G–5.5G, mini, nano 1G–3G) and virtually every mass-storage
+# player decode audio only at CD rates: 44.1 kHz, stereo. A hi-res (88.2/96/192
+# kHz) or multichannel (5.1) lossless source re-encoded at its native rate/layout
+# plays back garbled — the very "glitchy, unpleasant" audio users hear. Force the
+# output to 44.1 kHz stereo so it stays inside the hardware's spec (and matches
+# the sample-rate the iTunesDB writer records for every track).
+IPOD_SAMPLE_RATE = "44100"
+IPOD_CHANNELS = "2"
+
+
+def _ffmpeg_encoders() -> str:
+    try:
+        return subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, check=True).stdout
+    except Exception:
+        return ""
+
+
+# Apple-grade AAC encoders, best first. ffmpeg's *native* ``aac`` emits a
+# technically-valid stream that nonetheless stutters every few seconds on older
+# iPods (the 1st-gen nano's PortalPlayer decoder is intolerant of non-Apple AAC
+# framing — the "glitchy, unpleasant" audio). The clean, iPod-safe encoders are
+# Fraunhofer FDK (``libfdk_aac`` — what fre:ac and most good converters use,
+# cross-platform when the ffmpeg build enables it) and Apple's AudioToolbox
+# (``aac_at`` — macOS only). Prefer those; fall back to native ``aac`` only when
+# neither is present, and let the app warn in that case.
+_AAC_PREFERENCE = ("libfdk_aac", "aac_at", "aac")
+
+
+def aac_encoder() -> str:
+    """The AAC encoder ffmpeg should use for iPod-bound audio (best available)."""
+    out = _ffmpeg_encoders()
+    for enc in _AAC_PREFERENCE:
+        if enc == "aac" or enc in out:
+            return enc
+    return "aac"
+
+
+# Resolve once — the encoder set can't change under a running process.
+try:
+    _AAC_ENCODER = aac_encoder()
+except Exception:
+    _AAC_ENCODER = "aac"
+
+
+def aac_codec() -> str:
+    """The AAC encoder actually in use ('libfdk_aac' / 'aac_at' / 'aac')."""
+    return _AAC_ENCODER
+
+
+def is_apple_grade_aac() -> bool:
+    """True when the AAC encoder produces clean audio for old iPods. The native
+    ``aac`` encoder does not — the UI surfaces a warning / MP3 hint when False."""
+    return _AAC_ENCODER in ("libfdk_aac", "aac_at")
+
+
+def alac_codec() -> str:
+    """ALAC (Apple Lossless) encoder. Lossless → output is bit-exact regardless
+    of encoder, so the always-present native ``alac`` is fine everywhere."""
+    return "alac"
+
+
 def transcode_to_mp3(src: str, dst: str, bitrate_k: int = 320) -> str:
     """Transcode any source to CBR MP3 using ffmpeg. Raises on failure."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -87,6 +150,7 @@ def transcode_to_mp3(src: str, dst: str, bitrate_k: int = 320) -> str:
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", "-i", src,
         "-map", "0:a:0", "-c:a", "libmp3lame", "-b:a", f"{bitrate_k}k",
+        "-ar", IPOD_SAMPLE_RATE, "-ac", IPOD_CHANNELS,
         "-id3v2_version", "3", tmp,
     ]
     subprocess.run(cmd, check=True)
@@ -100,7 +164,26 @@ def transcode_to_aac(src: str, dst: str, bitrate_k: int = 256) -> str:
     tmp = dst + ".part.m4a"
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", "-i", src,
-        "-map", "0:a:0", "-c:a", "aac", "-b:a", f"{bitrate_k}k",
+        "-map", "0:a:0", "-c:a", _AAC_ENCODER, "-b:a", f"{bitrate_k}k",
+        "-ar", IPOD_SAMPLE_RATE, "-ac", IPOD_CHANNELS,
+        "-movflags", "+faststart", "-f", "ipod", tmp,
+    ]
+    subprocess.run(cmd, check=True)
+    os.replace(tmp, dst)
+    return dst
+
+
+def transcode_to_alac(src: str, dst: str, bitrate_k: int | None = None) -> str:
+    """Transcode to ALAC (Apple Lossless) in an .m4a container. Lossless, so no
+    bitrate — the ``bitrate_k`` arg is ignored (kept for a uniform signature).
+    Forced to 44.1 kHz / 16-bit stereo, the CD-rate every click-wheel iPod
+    decodes; hi-res/multichannel sources are down-converted to stay in spec."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = dst + ".part.m4a"
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", "-i", src,
+        "-map", "0:a:0", "-c:a", "alac", "-sample_fmt", "s16p",
+        "-ar", IPOD_SAMPLE_RATE, "-ac", IPOD_CHANNELS,
         "-movflags", "+faststart", "-f", "ipod", tmp,
     ]
     subprocess.run(cmd, check=True)
@@ -117,7 +200,9 @@ def target_format(device_type: str) -> str:
 
 def transcode(src: str, dst_base: str, fmt: str,
               bitrate_k: int | None = None) -> tuple[str, str]:
-    """Transcode to fmt ('aac'|'mp3'); returns (path, ext)."""
+    """Transcode to fmt ('aac'|'alac'|'mp3'); returns (path, ext)."""
+    if fmt == "alac":
+        return transcode_to_alac(src, dst_base + ".m4a"), ".m4a"
     if fmt == "aac":
         return transcode_to_aac(
             src, dst_base + ".m4a", bitrate_k or 256), ".m4a"

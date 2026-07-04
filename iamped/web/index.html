@@ -304,6 +304,13 @@
           <input id="bitrate-notch" type="range" min="0" max="5" step="1" value="5">
           <div class="bitrate-ticks" id="bitrate-ticks"></div>
         </div>
+        <div class="field hidden" id="ipod-format-field">
+          <label>iPod audio format <span class="muted" id="aac-quality-note"></span></label>
+          <select id="ipod-format">
+            <option value="aac">AAC — smaller files, great quality (recommended)</option>
+            <option value="alac">Apple Lossless (ALAC) — exact quality, much larger</option>
+          </select>
+        </div>
         <label>Include playlists</label>
         <div class="checklist" id="playlists"><div class="item muted">Build the library to load playlists.</div></div>
         <div style="margin:14px 0 0;">
@@ -346,6 +353,17 @@
               Sync this device automatically when it's plugged in (uses this saved profile)</label>
             <label class="check"><input type="checkbox" id="auto-readback" checked>
               Import plays &amp; ratings into Plex automatically on connect</label>
+            <div class="cache-settings">
+              <b>Local cache</b>
+              <div class="field">
+                <label>Cache size limit (MB) <span class="muted" id="cache-status-note"></span></label>
+                <input type="number" id="cache-limit" min="0" step="512" value="3072">
+              </div>
+              <label class="check"><input type="checkbox" id="aggressive-cache">
+                Aggressive caching — keep downloads for faster re-syncs (more disk; never auto-clears on exit)</label>
+              <button id="btn-clear-cache" type="button">Clear cache now</button>
+              <span class="muted" id="clear-cache-status"></span>
+            </div>
             <div class="device-tools">
               <div>
                 <b>Rollback</b>

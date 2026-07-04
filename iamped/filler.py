@@ -105,10 +105,29 @@ def should_transcode(track: dict, transcode_enabled: bool,
     return bool(target_bitrate_k and source_bitrate > target_bitrate_k)
 
 
+def should_transcode_to(track: dict, target_format: str,
+                        transcode_enabled: bool,
+                        target_bitrate_k: int | None = None) -> bool:
+    """Format-aware transcode gate. ALAC is lossless, so it only makes sense to
+    re-encode lossless sources (a lossy source can't gain quality and would just
+    bloat) — those pass through untouched. Lossy targets defer to the plain
+    bitrate/lossless rule in :func:`should_transcode`."""
+    if target_format == "alac":
+        return bool(transcode_enabled) and is_lossless(track)
+    return should_transcode(track, transcode_enabled, target_bitrate_k)
+
+
 def device_size(track: dict, transcode_lossless: bool,
                 target_format: str = "mp3",
                 target_bitrate_k: int | None = None) -> int:
     """Estimated bytes the track will occupy on the device."""
+    if target_format == "alac":
+        # Lossless: no bitrate. A lossless source becomes ALAC at 44.1/16 stereo
+        # (~900 kbps for CD-rate stereo); a lossy source passes through as-is.
+        if transcode_lossless and is_lossless(track):
+            secs = (track.get("duration_ms") or 0) / 1000.0
+            return max(int(secs * 900_000 / 8 * 1.05), 256_000)
+        return int(track.get("cached_size") or track.get("file_size") or 0)
     target_bitrate_k = target_bitrate_k or TARGET_BITRATE.get(
         target_format, 320_000) // 1000
     converting = should_transcode(

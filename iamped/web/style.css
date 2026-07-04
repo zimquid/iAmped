@@ -245,6 +245,9 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
 .status.ok { color: #1f7a3d; }
 .status.err { color: #b32b22; }
 .muted { color: #888; }
+.muted.warn { color: #e6750b; }
+.cache-settings { margin: 10px 0; padding: 10px; border: 1px solid #e2e2e2; border-radius: 6px; }
+.cache-settings > b { display: block; margin-bottom: 6px; }
 .pill { display: inline-block; background: #eef1f6; border: 1px solid #c5cdd9;
   border-radius: 10px; padding: 1px 9px; font-size: 11px; color: #44607f; margin: 2px 4px 2px 0; }
 .banner { background: #fff7e6; border: 1px solid #e7c777; color: #8a6418;

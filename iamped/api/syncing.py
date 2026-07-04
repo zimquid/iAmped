@@ -7,13 +7,13 @@ import time
 
 from flask import Blueprint, jsonify, request
 
-from .. import artwork, config, device_management, filler, plex_client
+from .. import artwork, cache, config, device_management, filler, plex_client
 from ..library import Library
 from ..server import _fmt_bytes, _lib, get_server, start_job
 from ..sync import (BACKENDS, free_bytes, target_format, total_bytes,
                     transcode)
 from ..sync import device_state
-from ..sync.base import have_ffmpeg
+from ..sync.base import aac_codec, have_ffmpeg
 
 bp = Blueprint("syncing", __name__)
 
@@ -61,11 +61,15 @@ def _materialize(server, lib: Library, track: dict, transcode_lossless: bool,
             dl_s = time.perf_counter() - t0
             lib.set_cached(rk, orig, os.path.getsize(orig))
 
-    if filler.should_transcode(
-            track, transcode_lossless, bitrate_k) and have_ffmpeg():
-        ext = ".m4a" if fmt == "aac" else ".mp3"
+    if filler.should_transcode_to(
+            track, fmt, transcode_lossless, bitrate_k) and have_ffmpeg():
+        ext = ".mp3" if fmt == "mp3" else ".m4a"
+        # Tag the cache key with the AAC encoder so an encoder change (e.g.
+        # native ``aac`` → Apple ``aac_at`` for iPod compatibility) re-encodes
+        # instead of silently reusing an older, differently-encoded file.
+        enc = f".{aac_codec()}" if fmt == "aac" else ""
         output_base = os.path.join(
-            cache, f"{rk}.{fmt}.{bitrate_k or 0}k")
+            cache, f"{rk}.{fmt}.{bitrate_k or 0}k{enc}")
         out = output_base + ext
         tx_s = 0.0
         with _mat_lock(f"tx:{rk}:{fmt}:{bitrate_k or 0}"):
@@ -87,6 +91,17 @@ def materialize(server, lib: Library, track: dict, transcode_lossless: bool,
     path, ext, _dl, _tx = _materialize(
         server, lib, track, transcode_lossless, fmt, bitrate_k)
     return path, ext
+
+
+def _resolve_fmt(dtype: str, params: dict) -> str:
+    """Target audio format for this device. iPods default to AAC but can opt
+    into ALAC (Apple Lossless) via ``ipod_format``; mass storage stays MP3."""
+    if dtype == "ipod":
+        choice = str(params.get("ipod_format")
+                     or config.load().get("ipod_format") or "aac").lower()
+        if choice in ("aac", "alac"):
+            return choice
+    return target_format(dtype)
 
 
 def _sync_timing_note(timing: dict, n: int, workers: int) -> str:
@@ -210,7 +225,7 @@ def _device_plan(params: dict) -> dict:
             exclude_meta = set()
 
     reserve = _reserve_bytes(path, params)
-    fmt = target_format(dtype)
+    fmt = _resolve_fmt(dtype, params)
     bitrate_k = int(params.get("target_bitrate_k")
                     or (256 if fmt == "aac" else 320))
     if "rating_keys" in params:
@@ -228,9 +243,15 @@ def _device_plan(params: dict) -> dict:
             fill_remaining=not bool(params.get("playlist_only")))
 
     transcode_lossless = bool(params.get("transcode_lossless", True))
+    # Tag transcoded output with the AAC encoder so switching encoders (native
+    # ``aac`` → Apple ``aac_at``) counts as a content change: mirror-mode syncs
+    # then re-copy the improved file instead of treating the on-device track as
+    # already current.
+    transcode_tag = f"{fmt}:{bitrate_k}k" + (
+        f":{aac_codec()}" if fmt == "aac" else "")
     for track in plan["tracks"]:
-        output = f"{fmt}:{bitrate_k}k" if filler.should_transcode(
-            track, transcode_lossless, bitrate_k) \
+        output = transcode_tag if filler.should_transcode_to(
+            track, fmt, transcode_lossless, bitrate_k) \
             else (track.get("container") or track.get("codec") or "original")
         track["_sync_signature"] = "|".join([
             str(track.get("part_key") or ""),
@@ -368,7 +389,7 @@ def _prefetch_job(job, params, token):
     diff = _device_plan(params)
     tracks = diff["add_tracks"]
     dtype = params.get("device_type", "massstorage")
-    fmt = target_format(dtype)
+    fmt = _resolve_fmt(dtype, params)
     tl = bool(params.get("transcode_lossless", True))
     bitrate_k = int(params.get("target_bitrate_k")
                     or (256 if fmt == "aac" else 320))
@@ -470,7 +491,7 @@ def _sync_job_inner(job, params):
     job["done"] = len(tracks) - len(remaining)
     job["phase"] = "syncing"
     tl = bool(params["transcode_lossless"])
-    fmt = target_format(dtype)
+    fmt = _resolve_fmt(dtype, params)
     bitrate_k = int(params.get("target_bitrate_k")
                     or (256 if fmt == "aac" else 320))
     want_artwork = bool(params.get("sync_artwork", True))
@@ -540,6 +561,9 @@ def _sync_job_inner(job, params):
     # foreign) is staged into the DB by import_existing/add_track above.
     swept = backend.sweep_orphans() if is_ipod else {"removed": 0, "freed_bytes": 0}
     removed = device_state.finish_cleanup(path, dtype, tx)
+    # Bound the local download/transcode cache now that this sync's files are
+    # safely on the device (no-op in aggressive mode).
+    cache.enforce_limit()
     updated = len(diff["update_keys"])
     added = len(tracks) - updated
     job["result"] = {
@@ -716,6 +740,9 @@ def api_plan():
                 256 if p.get("device_type") == "ipod" else 320)),
         "sync_artwork": bool(p.get("sync_artwork", True)),
         "mirror": bool(p.get("mirror", True)),
+        **({"ipod_format": p["ipod_format"]}
+           if p.get("device_type") == "ipod" and p.get("ipod_format")
+           in ("aac", "alac") else {}),
     })
     diff = _device_plan(p)
     plan = diff["plan"]

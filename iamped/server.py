@@ -11,9 +11,9 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import config, playback
+from . import cache, config, playback
 from .library import Library
-from .sync.base import have_ffmpeg
+from .sync.base import aac_codec, have_ffmpeg, is_apple_grade_aac
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 app = Flask(__name__, static_folder=None)
@@ -86,12 +86,27 @@ def api_get_config():
     cfg = config.load()
     cfg["has_ffmpeg"] = have_ffmpeg()
     cfg["native_playback"] = playback.PLAYER.status()
+    # AAC encoder quality: 'apple_grade' → libfdk_aac/aac_at (clean on old
+    # iPods); 'native' → ffmpeg's aac, which stutters on 1st-gen-era hardware.
+    cfg["aac_encoder"] = aac_codec()
+    cfg["aac_apple_grade"] = is_apple_grade_aac()
+    cfg["cache_status"] = cache.status()
     return jsonify(cfg)
 
 
 @app.post("/api/config")
 def api_set_config():
     return jsonify(config.save(request.json or {}))
+
+
+@app.get("/api/cache/status")
+def api_cache_status():
+    return jsonify(cache.status())
+
+
+@app.post("/api/cache/clear")
+def api_cache_clear():
+    return jsonify(cache.clear_all())
 
 
 @app.get("/api/job/<jid>")
