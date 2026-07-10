@@ -116,7 +116,9 @@ def _podcast_sync_job(job, params):
     with device_management.device_lock(path, dtype):
         backend_cls = BACKENDS[dtype]
         if dtype == "ipod":
-            backend = backend_cls(path, params.get("device_name") or "iPod")
+            backend = backend_cls(
+                path, params.get("device_name") or "iPod",
+                params.get("ipod_generation"))
         else:
             backend = backend_cls(path, params.get("layout") or "nested")
         backend.prepare()

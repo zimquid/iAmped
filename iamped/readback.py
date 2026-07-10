@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from . import plex_client
+from . import providers
 from .library import Library
 from .sync import itunesdb, playcounts, scrobblelog
 from .sync.device_state import atomic_write_bytes
@@ -134,23 +134,30 @@ def build_plan(lib: Library, device_path: str, device_type: str,
 
 def apply_plan(server, lib: Library, device_path: str, device_type: str,
                plan: list[dict], reset: bool = True, progress=None) -> dict:
+    connection = providers.normalize(server)
+    capabilities = connection.capabilities
     plays_added = ratings_set = 0
     for n, item in enumerate(plan):
         rk = item["rating_key"]
+        track = lib.get_tracks([rk]).get(rk)
+        if track is None:
+            continue
         for _ in range(int(item.get("plays_delta") or 0)):
-            plex_client.scrobble(server, rk)
+            if not capabilities.play_state_write:
+                break
+            connection.provider.scrobble(connection, track)
             plays_added += 1
-        if item.get("plays_delta"):
+        if item.get("plays_delta") and capabilities.play_state_write:
             lib.add_local_plays(rk, item["plays_delta"], item.get("last_played_unix"))
-        if item.get("new_rating") is not None:
-            plex_client.set_rating(server, rk, item["new_rating"])
+        if item.get("new_rating") is not None and capabilities.rating_write:
+            connection.provider.set_rating(connection, track, item["new_rating"])
             lib.set_local_rating(rk, item["new_rating"])
             ratings_set += 1
         if progress:
             progress(n + 1, len(plan))
 
     reset_done = False
-    if reset:
+    if reset and (plays_added or ratings_set):
         reset_done = _reset_device(device_path, device_type, plan)
     return {"plays_added": plays_added, "ratings_set": ratings_set,
             "reset": reset_done}

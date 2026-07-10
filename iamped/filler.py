@@ -179,9 +179,13 @@ def explicit_plan(lib: Library, rating_keys: list[str], capacity_bytes: int,
                   reserve_bytes: int, transcode_lossless: bool,
                   target_format: str = "mp3",
                   target_bitrate_k: int | None = None,
-                  max_tracks: Optional[int] = None) -> dict:
+                  max_tracks: Optional[int] = None,
+                  source_id: str | None = None) -> dict:
     """Plan an iTunes-style drag/drop selection in the supplied row order."""
     rows = lib.get_tracks(rating_keys)
+    if source_id is not None:
+        rows = {key: row for key, row in rows.items()
+                if row.get("source_id") == source_id}
     ordered = [rows[k] for k in rating_keys if k in rows]
     requested_bytes = sum(device_size(
         t, transcode_lossless, target_format, target_bitrate_k)
@@ -224,7 +228,8 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
          exclude_keys: Optional[set[str]] = None,
          exclude_meta: Optional[set[str]] = None,
          target_bitrate_k: int | None = None,
-         fill_remaining: bool = True) -> dict:
+         fill_remaining: bool = True,
+         source_id: str | None = None) -> dict:
     budget = max(capacity_bytes - reserve_bytes, 0)
     used = 0
     chosen: dict[str, dict] = {}          # rating_key -> track row (+ _size)
@@ -270,7 +275,12 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
 
     # 1) selected playlists first, in playlist order
     planned_playlists: list[dict] = []
-    all_pls = lib.all_playlists()
+    try:
+        all_pls = lib.all_playlists(source_id)
+    except TypeError:
+        # Lightweight test/third-party Library doubles from before sources did
+        # not accept a filter; their data is already scoped by the caller.
+        all_pls = lib.all_playlists()
     for pid in include_playlist_ids:
         keys = lib.playlist_track_keys_any(pid)
         rows = lib.get_tracks(keys)
@@ -289,7 +299,11 @@ def plan(lib: Library, capacity_bytes: int, reserve_bytes: int,
 
     # 2) fill the rest by ranking
     if fill_remaining and (not max_tracks or len(chosen) < max_tracks):
-        for tr in lib.ordered_tracks(fill_strategy):
+        try:
+            ranked = lib.ordered_tracks(fill_strategy, source_id=source_id)
+        except TypeError:
+            ranked = lib.ordered_tracks(fill_strategy)
+        for tr in ranked:
             if used >= budget:
                 break
             try_add(tr)

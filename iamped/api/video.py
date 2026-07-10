@@ -5,7 +5,7 @@ import os
 
 from flask import Blueprint, Response, jsonify, request
 
-from .. import config, device_management, inventory, plex_client
+from .. import config, device_management, inventory, plex_client, providers
 from ..server import get_server, start_job
 from ..sync import itunesdb
 from ..sync import video as video_mod
@@ -15,6 +15,14 @@ from ..sync.base import have_ffmpeg
 from . import syncing
 
 bp = Blueprint("video", __name__)
+
+
+def _plex_server():
+    """Video sync remains Plex-only until a provider exposes video metadata."""
+    connection = providers.normalize(get_server())
+    if connection.kind != "plex":
+        raise RuntimeError("Video sync is currently available for Plex sources only.")
+    return connection.client
 
 
 def _resolve_device_and_profile(params: dict):
@@ -132,7 +140,7 @@ def _video_selection(server, params) -> list:
 
 
 def _video_sync_job_inner(job, params):
-    server = get_server()
+    server = _plex_server()
     job["phase"] = "planning"
     job["message"] = "Checking the device…"
     device, cap, profile = _resolve_device_and_profile(params)
@@ -157,7 +165,8 @@ def _video_sync_job_inner(job, params):
         existing = backend.existing_keys()
     elif transport == "ipod":
         backend = itunesdb.ITunesDBBackend(
-            params["device_path"], params.get("device_name") or "iPod")
+            params["device_path"], params.get("device_name") or "iPod",
+            params.get("ipod_generation"))
         backend.prepare()
         backend.import_existing()           # preserve everything already on it
         existing = set(backend._by_key)
@@ -231,7 +240,7 @@ def _video_sync_job(job, params):
 @bp.get("/api/video/sections")
 def api_video_sections():
     try:
-        server = get_server()
+        server = _plex_server()
         return jsonify({"sections": plex_client.video_sections(server)})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
@@ -244,7 +253,7 @@ def api_video_items():
     if not section:
         return jsonify({"error": "No video library selected."}), 400
     try:
-        server = get_server()
+        server = _plex_server()
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
     if kind == "show":
@@ -265,7 +274,7 @@ def api_video_episodes():
     if not show_key:
         return jsonify({"error": "No show selected."}), 400
     try:
-        server = get_server()
+        server = _plex_server()
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
     eps = [{
@@ -284,7 +293,7 @@ def api_video_thumb():
     if not key:
         return Response(status=404)
     try:
-        server = get_server()
+        server = _plex_server()
         from urllib.parse import quote
         url = server.url(
             f"/photo/:/transcode?width=320&height=480&minSize=1&upscale=0"

@@ -7,7 +7,7 @@ import time
 
 from flask import Blueprint, jsonify, request
 
-from .. import artwork, cache, config, device_management, filler, plex_client
+from .. import artwork, cache, config, device_management, filler, providers
 from ..library import Library
 from ..server import _fmt_bytes, _lib, get_server, start_job
 from ..sync import (BACKENDS, free_bytes, target_format, total_bytes,
@@ -57,7 +57,8 @@ def _materialize(server, lib: Library, track: dict, transcode_lossless: bool,
     with _mat_lock(f"dl:{rk}"):
         if not (os.path.exists(orig) and os.path.getsize(orig) > 0):
             t0 = time.perf_counter()
-            plex_client.download_part(server, track["part_key"], orig)
+            connection = providers.normalize(server)
+            connection.provider.download_track(connection, track, orig)
             dl_s = time.perf_counter() - t0
             lib.set_cached(rk, orig, os.path.getsize(orig))
 
@@ -159,14 +160,14 @@ def _resolve_capability(params: dict):
 def _reserve_bytes(path: str, params: dict) -> int:
     """Headroom to keep free on the device, capped for small players.
 
-    The configured reserve (default 200 MB) is sensible for iPods and large
+    The configured reserve (default 20 MB) is sensible for iPods and large
     USB drives, but on a sub-1 GB player like a Creative MuVo it can swallow
-    most of the disk — the sync budget is ``free - reserve``, so a flat 200 MB
+    most of the disk — the sync budget is ``free - reserve``, so a flat 20 MB
     on a 495 MB device collapses the budget to near-zero and every track gets
     "skipped for space". Cap the reserve at 5% of total capacity so small
     devices keep a sane, proportional amount of headroom instead.
     """
-    requested = int(params.get("reserve_mb", 200)) * 1024 * 1024
+    requested = int(params.get("reserve_mb", 20)) * 1024 * 1024
     total = total_bytes(path)
     if total:
         return min(requested, int(total * 0.05))
@@ -184,6 +185,7 @@ def _device_plan(params: dict) -> dict:
     path = params["device_path"]
     dtype = params.get("device_type", "massstorage")
     mirror = bool(params.get("mirror", True))
+    source_id = str((config.active_source(config.load()) or {}).get("id") or "plex")
     lib = _lib()
     manifest = device_state.read_manifest(path, dtype)
     pending_tx = device_state.read_json(device_state.journal_path(path, dtype))
@@ -201,10 +203,12 @@ def _device_plan(params: dict) -> dict:
     else:
         exclude_keys = set(valid_prior)
 
+    ipod_rows = []
     if dtype == "ipod":
         try:
             inv = inventory.read_device_library(path, "ipod")
             rows = inv["tracks"]
+            ipod_rows = rows
             if mirror:
                 foreign_meta = {
                     filler.match_key(t.get("artist"), t.get("title"))
@@ -232,7 +236,7 @@ def _device_plan(params: dict) -> dict:
         plan = filler.explicit_plan(
             lib, [str(k) for k in params.get("rating_keys", [])], capacity,
             reserve, bool(params.get("transcode_lossless", True)),
-            fmt, bitrate_k, params.get("max_tracks"))
+            fmt, bitrate_k, params.get("max_tracks"), source_id=source_id)
     else:
         plan = filler.plan(
             lib, capacity, reserve, params.get("fill_strategy", "most_played"),
@@ -240,7 +244,7 @@ def _device_plan(params: dict) -> dict:
             bool(params.get("transcode_lossless", True)), params.get("max_tracks"),
             fmt, exclude_keys=exclude_keys, exclude_meta=exclude_meta,
             target_bitrate_k=bitrate_k,
-            fill_remaining=not bool(params.get("playlist_only")))
+            fill_remaining=not bool(params.get("playlist_only")), source_id=source_id)
 
     transcode_lossless = bool(params.get("transcode_lossless", True))
     # Tag transcoded output with the AAC encoder so switching encoders (native
@@ -262,6 +266,18 @@ def _device_plan(params: dict) -> dict:
         ])
 
     desired = {str(t["rating_key"]): t for t in plan["tracks"]}
+    artwork_update_keys: set[str] = set()
+    if dtype == "ipod" and bool(params.get("sync_artwork", True)):
+        artwork_update_keys = {
+            str(t.get("rating_key"))
+            for t in ipod_rows
+            if t.get("origin") == inventory.ORIGIN_IAMPED
+            and str(t.get("rating_key")) in desired
+            and str(t.get("rating_key")) in valid_prior
+            and desired[str(t.get("rating_key"))].get("album_thumb")
+            and int(t.get("artwork_count") or 0) <= 0
+        }
+
     if mirror:
         update_keys = {
             key for key in set(desired) & set(valid_prior)
@@ -333,10 +349,42 @@ def _device_plan(params: dict) -> dict:
         "add_tracks": add_tracks,
         "removals": removals,
         "update_keys": update_keys,
+        "artwork_update_keys": artwork_update_keys,
         "pending_transaction": bool(
             pending_tx and pending_tx.get("status") in {"copying", "metadata", "cleanup"}),
         "mirror": mirror,
     }
+
+
+def _backfill_ipod_artwork(server, backend, desired: dict[str, dict]) -> int:
+    """Attach Plex album art to already-staged iAmped tracks missing iPod art."""
+    assigned = 0
+    album_paths: dict[str, str | None] = {}
+    for entry in getattr(backend, "_entries", []):
+        if getattr(entry, "origin", "") not in ("new", "iamped"):
+            continue
+        if getattr(entry, "art_path", None) or entry.track.get("_artwork_present") \
+                or int(entry.track.get("_artwork_id") or 0):
+            continue
+        key = str(entry.track.get("rating_key") or "")
+        source = desired.get(key)
+        if not source or not source.get("album_thumb"):
+            continue
+        album_id = artwork.album_identity(source)
+        if album_id not in album_paths:
+            try:
+                album_paths[album_id] = artwork.materialize(server, source)
+            except Exception:
+                album_paths[album_id] = None
+        art_path = album_paths[album_id]
+        if not art_path:
+            continue
+        for field in ("artist", "album", "album_artist", "album_key", "album_thumb"):
+            if source.get(field):
+                entry.track[field] = source[field]
+        entry.art_path = art_path
+        assigned += 1
+    return assigned
 
 
 def _bitrate_options(params: dict, budget_bytes: int) -> list[dict]:
@@ -384,7 +432,7 @@ def _cancel_prefetch() -> int:
 
 
 def _prefetch_job(job, params, token):
-    server = get_server()
+    server = providers.normalize(get_server())
     lib = _lib()
     diff = _device_plan(params)
     tracks = diff["add_tracks"]
@@ -425,7 +473,7 @@ def _start_prefetch(params: dict) -> str | None:
 
 
 def _sync_job_inner(job, params):
-    server = get_server()
+    server = providers.normalize(get_server())
     lib = _lib()
     is_ipod = params["device_type"] == "ipod"
     dtype = params["device_type"]
@@ -463,7 +511,9 @@ def _sync_job_inner(job, params):
 
     backend_cls = BACKENDS[dtype]
     if is_ipod:
-        backend = backend_cls(path, params.get("device_name") or "iPod")
+        backend = backend_cls(
+            path, params.get("device_name") or "iPod",
+            params.get("ipod_generation"))
     else:
         backend = backend_cls(path, _resolve_capability(params).layout)
     backend.prepare()
@@ -554,6 +604,11 @@ def _sync_job_inner(job, params):
     job["message"] = "Finalizing device database…"
     tx["status"] = "metadata"
     device_state.checkpoint(path, dtype, tx)
+    artwork_updated = 0
+    if is_ipod and want_artwork:
+        job["message"] = "Preparing album artwork…"
+        artwork_updated = _backfill_ipod_artwork(server, backend, diff["desired"])
+        job["message"] = "Finalizing device database…"
     backend.finalize()
     # Sweep files the freshly-written database doesn't reference — junk from
     # interrupted or older-build syncs that the iPod counts as "Other" and that
@@ -580,6 +635,7 @@ def _sync_job_inner(job, params):
         "resumed": resumed,
         "backup": backup,
         "artwork": want_artwork,
+        "artwork_updated": artwork_updated,
         "timing": timing_note,
         "orphans_removed": swept["removed"],
         "orphans_freed_bytes": swept["freed_bytes"],
@@ -589,6 +645,7 @@ def _sync_job_inner(job, params):
         + (f", updated {updated}" if updated else "")
         + (f", preserved {carried} already on the device" if carried else "")
         + (f", removed {removed + recovered} stale track(s)" if removed + recovered else "")
+        + (f", refreshed artwork for {artwork_updated} track(s)" if artwork_updated else "")
         + (f", reclaimed {_fmt_bytes(swept['freed_bytes'])} of 'Other' junk"
            if swept["removed"] else "")
         + f" → {carried + len(tracks)} total on {params['device_path']}."
@@ -618,7 +675,7 @@ def _mtp_sync_job_inner(job, params):
     sent is recorded host-side so reruns don't duplicate.
     """
     from ..sync import mtp
-    server = get_server()
+    server = providers.normalize(get_server())
     lib = _lib()
     backend = mtp.MTPBackend(params.get("mtp_busloc"),
                              folder=params.get("mtp_folder") or "Music")
@@ -642,13 +699,15 @@ def _mtp_sync_job_inner(job, params):
     if "rating_keys" in params:
         plan = filler.explicit_plan(
             lib, [str(k) for k in params.get("rating_keys", [])], capacity,
-            reserve, tl, fmt, bitrate_k, params.get("max_tracks"))
+            reserve, tl, fmt, bitrate_k, params.get("max_tracks"),
+            source_id=server.source_id)
     else:
         plan = filler.plan(
             lib, capacity, reserve, params.get("fill_strategy", "most_played"),
             params.get("playlist_ids", []), tl, params.get("max_tracks"), fmt,
             exclude_keys=existing, target_bitrate_k=bitrate_k,
-            fill_remaining=not bool(params.get("playlist_only")))
+            fill_remaining=not bool(params.get("playlist_only")),
+            source_id=server.source_id)
 
     tracks = [t for t in plan["tracks"] if str(t["rating_key"]) not in existing]
     job["total"] = len(tracks)
@@ -732,7 +791,7 @@ def api_plan():
     config.save({
         "last_device_path": p["device_path"],
         "last_device_type": p.get("device_type", "massstorage"),
-        "reserve_mb": int(p.get("reserve_mb", 200)),
+        "reserve_mb": int(p.get("reserve_mb", 20)),
         "fill_strategy": p.get("fill_strategy", "most_played"),
         "transcode_lossless": bool(p.get("transcode_lossless", True)),
         f"{target_format(p.get('device_type', 'massstorage'))}_bitrate_k":
@@ -785,6 +844,7 @@ def api_plan():
         "prefetch_job": prefetch,
         "track_count": len(diff["add_tracks"]),
         "update_count": len(diff["update_keys"]),
+        "artwork_update_count": len(diff["artwork_update_keys"]),
         "add_count": len(diff["add_tracks"]) - len(diff["update_keys"]),
         "desired_track_count": plan["track_count"],
         "keep_count": len(diff["keep_tracks"] or {}),

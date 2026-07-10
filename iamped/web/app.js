@@ -103,6 +103,12 @@ const STATE = {
   transferTitle: "",
   pendingTransferPlan: null,
   draggedPlaylist: null,
+  fillStrategy: "most_played",
+  activity: null,
+  lcdMode: "default",
+  sources: [],
+  activeSourceId: "",
+  sourceCapabilities: {},
 };
 
 const fmtClock = (sec) => {
@@ -112,6 +118,10 @@ const fmtClock = (sec) => {
 const isDeviceTrack = (t) => String(t?.rating_key || "").startsWith("dev:");
 const artworkUrl = (key) => key ? `/api/artwork?key=${encodeURIComponent(key)}` : "";
 const plural = (n, word) => `${Number(n || 0).toLocaleString()} ${word}${Number(n || 0) === 1 ? "" : "s"}`;
+const reserveDefaultMb = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n !== 200 ? n : 20;
+};
 
 function activeEditableTarget(e) {
   const tag = e.target?.tagName;
@@ -123,6 +133,8 @@ function updateTransportModes() {
   // up-next to match (harmless no-op when nothing is playing natively)
   if (typeof queueUpNext === "function" && STATE.nativePlaybackActive) queueUpNext();
   $("t-shuffle").classList.toggle("active", STATE.shuffle);
+  $("t-shuffle").title = STATE.shuffle ? "Shuffle: on" : "Shuffle: off";
+  $("t-shuffle").setAttribute("aria-pressed", STATE.shuffle ? "true" : "false");
   $("t-repeat").classList.toggle("active", STATE.repeat !== "off");
   $("repeat-one").classList.toggle("hidden", STATE.repeat !== "one");
   $("t-repeat").title = STATE.repeat === "one" ? "Repeat One" : STATE.repeat === "all" ? "Repeat All" : "Repeat";
@@ -175,8 +187,8 @@ function updateNowPlaying() {
 
 // ---- LCD + bottom bar ---------------------------------------------------
 // `lcd()` drives the title/subtitle and the generic progress fill used by
-// build/sync/planning jobs (no track times shown).
-function lcd(main, sub, frac) {
+// non-playback status updates (no track times shown).
+function renderLcd(main, sub, frac) {
   if (main != null) $("lcd-main").textContent = main;
   if (sub != null) $("lcd-sub").textContent = sub;
   const row = $("lcd-progrow");
@@ -184,9 +196,58 @@ function lcd(main, sub, frac) {
   if (frac == null) row.classList.add("hidden");
   else { row.classList.remove("hidden"); $("lcd-prog").firstElementChild.style.width = `${Math.min(100, frac * 100)}%`; }
 }
+
+function lcd(main, sub, frac) {
+  STATE.lcdMode = "default";
+  $("lcd-copy").classList.remove("activity");
+  renderLcd(main, sub, frac);
+}
+
+function hasActivePlayback() {
+  return Boolean(currentTrack() && !isPlaybackPaused());
+}
+
+function showPlaybackLcd() {
+  const track = currentTrack();
+  if (!track) return;
+  STATE.lcdMode = "playback";
+  $("lcd-copy").classList.remove("activity");
+  renderLcd(track.title, `${track.artist} — ${track.album}`);
+  scrub(trackDuration() ? playbackPosition() / trackDuration() : 0, playbackPosition(), trackDuration());
+}
+
+// Long-running work temporarily occupies the LCD, but playback remains one
+// click away. Subsequent progress updates respect that explicit choice.
+function showActivity(main, sub, frac, start = false) {
+  STATE.activity = { main, sub, frac };
+  if (!hasActivePlayback()) { lcd(main, sub, frac); return; }
+  if (start) STATE.lcdMode = "activity";
+  if (STATE.lcdMode === "playback") return;
+  STATE.lcdMode = "activity";
+  $("lcd-copy").classList.add("activity");
+  renderLcd(main, sub, frac);
+}
+
+function finishActivity(main = "iAmped", sub = "") {
+  STATE.activity = null;
+  if (hasActivePlayback()) { showPlaybackLcd(); return; }
+  lcd(main, sub);
+}
+
+$("lcd-copy").onclick = () => {
+  if (STATE.lcdMode === "activity" && hasActivePlayback()) showPlaybackLcd();
+};
+$("lcd-copy").onkeydown = (e) => {
+  if ((e.key === "Enter" || e.key === " ") && STATE.lcdMode === "activity" && hasActivePlayback()) {
+    e.preventDefault();
+    showPlaybackLcd();
+  }
+};
+
 // `scrub()` is the playback face of the same bar: a real iTunes-style seek bar
 // flanked by elapsed / remaining time.
 function scrub(frac, elapsed, dur) {
+  if (STATE.lcdMode === "activity") return;
   const row = $("lcd-progrow");
   row.classList.remove("hidden"); row.classList.add("with-time");
   $("lcd-prog").firstElementChild.style.width = `${Math.min(100, Math.max(0, (frac || 0) * 100))}%`;
@@ -244,11 +305,56 @@ function selectPane(paneId, srcEl) {
 document.querySelectorAll(".src-item[data-pane]").forEach((el) => { el.onclick = () => selectPane(el.dataset.pane, el); });
 
 // ---------------------------------------------------------------- config / connect
+function setSourceKind(kind) {
+  const names = { plex: "Plex", jellyfin: "Jellyfin", kodi: "Kodi" };
+  kind = names[kind] ? kind : "plex";
+  const isPlex = kind === "plex";
+  const isJellyfin = kind === "jellyfin";
+  const isKodi = kind === "kodi";
+  $("source-kind").value = kind;
+  $("server-heading").textContent = `${names[kind]} Server`;
+  $("server-lead").textContent = isPlex
+    ? "Plexamp is only a client — iAmped reads your Plex music metadata and downloads audio directly to your device."
+    : isJellyfin
+      ? "Connect directly to your Jellyfin music library. iAmped reads metadata and downloads original audio for device sync."
+      : "Connect to Kodi's JSON-RPC music library. Sync requires Kodi to expose downloadable original music files.";
+  $("plex-oauth-box").classList.toggle("hidden", !isPlex);
+  $("login-row").classList.toggle("hidden", !(isJellyfin || isKodi));
+  $("token-field").classList.toggle("hidden", isKodi);
+  $("token-label").textContent = isJellyfin ? "Access token (optional with login)" : "Plex token";
+  $("token").placeholder = isJellyfin ? "Jellyfin access token" : "X-Plex-Token";
+  $("username-label").textContent = isKodi ? "Kodi web-server username" : "Jellyfin username";
+  $("manual-label").textContent = isPlex ? "Or connect manually (optional)" : "Connection details";
+}
+
+function renderSources(cfg) {
+  STATE.sources = cfg.sources || [];
+  STATE.activeSourceId = cfg.active_source_id || "";
+  const select = $("source-select");
+  select.innerHTML = '<option value="">Add a server…</option>' + STATE.sources.map((source) =>
+    `<option value="${esc(source.id)}">${esc(source.name || source.kind)} (${esc(source.kind)})</option>`).join("");
+  select.value = STATE.activeSourceId || "";
+  const active = STATE.sources.find((source) => source.id === STATE.activeSourceId);
+  if (active) {
+    $("source-kind").value = active.kind;
+    $("source-name").value = active.name || "";
+    $("baseurl").value = active.baseurl || "";
+    $("token").value = ""; // tokens are deliberately never exposed by /api/config
+    $("source-username").value = "";
+    $("source-password").value = "";
+    STATE.sourceCapabilities = active.capabilities || {};
+    setSourceKind(active.kind);
+  } else {
+    STATE.sourceCapabilities = {};
+    setSourceKind($("source-kind").value);
+  }
+}
+
 async function loadConfig() {
   const cfg = await api("/api/config");
-  $("baseurl").value = cfg.plex_baseurl || ""; $("token").value = cfg.plex_token || "";
-  $("device-path").value = cfg.last_device_path || ""; $("reserve").value = cfg.reserve_mb ?? 200;
-  $("strategy").value = cfg.fill_strategy || "most_played";
+  renderSources(cfg);
+  $("device-path").value = cfg.last_device_path || ""; $("reserve").value = reserveDefaultMb(cfg.reserve_mb);
+  STATE.fillStrategy = cfg.fill_strategy || "most_played";
   $("transcode").checked = cfg.transcode_lossless !== false;
   STATE.bitrateByFormat.aac = Number(cfg.aac_bitrate_k) || 256;
   STATE.bitrateByFormat.mp3 = Number(cfg.mp3_bitrate_k) || 320;
@@ -268,7 +374,8 @@ async function loadConfig() {
   // The cached library is browsable offline; only build/play/sync need Plex.
   let st = { tracks: 0 };
   try { st = await api("/api/library/stats"); await refreshStats(); await loadSidebar(); } catch (e) {}
-  if (cfg.plex_baseurl && cfg.plex_token) connect();
+  const active = STATE.sources.find((source) => source.id === STATE.activeSourceId);
+  if (active?.configured) activateSource(active.id, true);
   if (st.tracks > 0) openLibrary();
 }
 
@@ -329,23 +436,47 @@ if ($("btn-clear-cache")) $("btn-clear-cache").onclick = clearCacheNow;
 
 async function connect() {
   const s = $("connect-status"); s.className = "status"; s.textContent = "Connecting…";
-  lcd("Connecting…", "Reaching Plex Media Server");
+  const kind = $("source-kind").value;
+  lcd("Connecting…", `Reaching ${kind === "jellyfin" ? "Jellyfin" : kind === "kodi" ? "Kodi" : "Plex"}`);
   try {
-    const res = await api("/api/connect", "POST", { baseurl: $("baseurl").value.trim(), token: $("token").value.trim() });
+    const res = await api("/api/sources/connect", "POST", {
+      id: $("source-select").value || undefined,
+      kind, name: $("source-name").value.trim(),
+      baseurl: $("baseurl").value.trim(), token: $("token").value.trim(),
+      username: $("source-username").value.trim(), password: $("source-password").value,
+    });
     if (!res.ok) throw new Error(res.error);
     await showConnected(res);
+    const cfg = await api("/api/config"); renderSources(cfg);
   } catch (e) { s.className = "status err"; s.textContent = `Could not connect: ${e.message}`; lcd("iAmped", "Not connected"); }
 }
 
 function showConnected(res) {
   const s = $("connect-status");
   s.className = "status ok";
-  s.textContent = `Connected to ${res.server.name} (Plex ${res.server.version}).`;
+  const name = res.provider === "jellyfin" ? "Jellyfin" : res.provider === "kodi" ? "Kodi" : "Plex";
+  s.textContent = `Connected to ${res.server.name}${res.server.version ? ` (${name} ${res.server.version})` : ""}.`;
   if (STATE.playing < 0) lcd("iAmped", `Connected to ${res.server.name}`);
-  $("section").innerHTML = res.sections.map((x) => `<option>${esc(x)}</option>`).join("");
+  $("section").innerHTML = res.sections.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("");
   $("section-wrap").classList.toggle("hidden", res.sections.length === 0);
+  STATE.sourceCapabilities = res.capabilities || {};
+  $("btn-sonic").classList.toggle("hidden", !STATE.sourceCapabilities.sonic_radio);
+  $("btn-radio").classList.toggle("hidden", !STATE.sourceCapabilities.sonic_radio);
+  $("src-video").classList.toggle("hidden", !STATE.sourceCapabilities.video);
   $("btn-build").disabled = false;
   return Promise.all([refreshStats(), loadSidebar()]);
+}
+
+async function activateSource(sourceId, quiet = false) {
+  if (!sourceId) return;
+  try {
+    const res = await api("/api/sources/active", "POST", { source_id: sourceId });
+    if (!res.ok) throw new Error(res.error || "Could not activate the media source.");
+    await showConnected(res);
+    STATE.activeSourceId = sourceId;
+  } catch (e) {
+    if (!quiet) { const s = $("connect-status"); s.className = "status err"; s.textContent = e.message; }
+  }
 }
 
 async function finishPlexOAuth() {
@@ -357,7 +488,7 @@ async function finishPlexOAuth() {
       login_id: STATE.plexLoginId,
       server_id: $("oauth-server").value,
     });
-    $("baseurl").value = (await api("/api/config")).plex_baseurl || "";
+    renderSources(await api("/api/config"));
     $("token").value = "";
     $("oauth-server-wrap").classList.add("hidden");
     $("oauth-link").classList.add("hidden");
@@ -431,16 +562,27 @@ async function buildLibrary(mode = "auto") {
   try {
     const { job } = await api("/api/library/build", "POST",
       { section: $("section").value || undefined, mode });
+    showActivity("Building library", "Preparing…", 0, true);
     pollJob(job, {
       onProgress: (j) => {
         const count = j.total
           ? `${Number(j.done || 0).toLocaleString()} of ${Number(j.total).toLocaleString()}`
           : Number(j.done || 0).toLocaleString();
         s.textContent = j.total ? `${j.message || j.phase} (${count})` : (j.message || j.phase);
-        lcd("Building library", j.total ? count : (j.message || j.phase), j.total ? j.done / j.total : null);
+        showActivity("Building library", j.total ? count : (j.message || j.phase), j.total ? j.done / j.total : null);
       },
-      onDone: async (j) => { s.className = "status ok"; s.textContent = j.message; lcd("iAmped", j.message); $("btn-build").disabled = false; await refreshStats(); await loadSidebar(); openLibrary(); },
-      onError: (e) => { s.className = "status err"; s.textContent = e; lcd("iAmped", "Build failed"); $("btn-build").disabled = false; },
+      onDone: async (j) => {
+        STATE.sourceCapabilities = j.result?.capabilities || STATE.sourceCapabilities;
+        if (STATE.sourceCapabilities.original_download === false) {
+          s.className = "status err";
+          s.textContent = "Library cached, but Kodi did not expose downloadable originals. Enable Files.Download or mount the music share.";
+        } else {
+          s.className = "status ok"; s.textContent = j.message;
+        }
+        finishActivity("iAmped", j.message); $("btn-build").disabled = false;
+        await refreshStats(); await loadSidebar(); openLibrary();
+      },
+      onError: (e) => { s.className = "status err"; s.textContent = e; finishActivity("iAmped", "Build failed"); $("btn-build").disabled = false; },
     });
   } catch (e) { s.className = "status err"; s.textContent = e.message; $("btn-build").disabled = false; }
 }
@@ -685,6 +827,7 @@ async function loadSidebar() {
         ${p.source === "local" && p.kind === "sonic" ? sonicSvg : plSvg}${esc(p.title)}</div>`).join("");
     list.querySelectorAll(".playlist").forEach((el) => {
       el.onclick = () => openPlaylist(el);
+      el.oncontextmenu = (event) => showPlaylistContextMenu(event, el);
       el.draggable = true;
       el.ondragstart = (event) => {
         STATE.draggedPlaylist = {
@@ -792,7 +935,6 @@ async function openDeviceMusic(el) {
   const type = el.dataset.ipod === "true" ? "ipod" : "massstorage";
   STATE.view = { type: "device", title: el.dataset.name, path };
   $("browse-title").textContent = `${el.dataset.name} — Music`;
-  $("btn-del-pl").classList.add("hidden");
   selectPane("pane-browse", el);
   STATE.tracks = []; $("browse-body").innerHTML = "";
   lcd("Reading device…", path);
@@ -844,7 +986,6 @@ async function openDeviceVideos(el) {
   DEVVID.path = path; DEVVID.ipod = ipod; DEVVID.name = el.dataset.name;
   STATE.view = { type: "device-videos", title: el.dataset.name, path };
   $("browse-title").textContent = `${el.dataset.name} — Videos`;
-  $("btn-del-pl").classList.add("hidden");
   selectPane("pane-browse", el);
   _setBrowseVideoMode(true);
   $("browse-body").innerHTML = `<div class="muted" style="padding:14px">Reading device…</div>`;
@@ -1000,7 +1141,6 @@ function openFacetIndex(kind) {
   STATE.view = { type: "facet", kind, title: facetTitle(kind) };
   STATE.selected.clear(); STATE.tracks = [];
   $("browse-title").textContent = facetTitle(kind);
-  $("btn-del-pl").classList.add("hidden");
   selectPane("pane-browse", facetSrc(kind));
   renderFacetList(kind);
 }
@@ -1014,7 +1154,6 @@ function openFacetTracks(kind, item) {
   };
   STATE.search = ""; $("search").value = ""; STATE.offset = 0; STATE.total = 0;
   $("browse-title").textContent = item.name;
-  $("btn-del-pl").classList.add("hidden");
   selectPane("pane-browse", facetSrc(kind));
   STATE.tracks = []; $("browse-body").innerHTML = "";
   loadMore(true);
@@ -1022,7 +1161,7 @@ function openFacetTracks(kind, item) {
 function openLibrary() {
   STATE.view = { type: "library", title: "Music" };
   STATE.search = $("search").value.trim(); STATE.offset = 0; STATE.total = 0;
-  $("browse-title").textContent = "Music"; $("btn-del-pl").classList.add("hidden");
+  $("browse-title").textContent = "Music";
   selectPane("pane-browse", $("src-music"));
   STATE.tracks = []; $("browse-body").innerHTML = "";
   loadMore(true);
@@ -1055,7 +1194,6 @@ async function openPlaylist(el) {
   const id = el.dataset.id;
   STATE.view = { type: "playlist", id, title: el.dataset.title, source: el.dataset.source };
   $("browse-title").textContent = el.dataset.title;
-  $("btn-del-pl").classList.toggle("hidden", el.dataset.source !== "local");
   selectPane("pane-browse", el);
   const r = await api(`/api/playlist/${encodeURIComponent(id)}/tracks`);
   STATE.tracks = r.tracks; renderTracks();
@@ -1360,6 +1498,34 @@ document.addEventListener("click", hideCtxMenu);
 document.addEventListener("scroll", hideCtxMenu, true);
 window.addEventListener("blur", hideCtxMenu);
 
+function showContextItems(e, items) {
+  ctxMenu.innerHTML = items.map((it, i) => it.sep
+    ? '<div class="ctx-sep"></div>'
+    : `<div class="ctx-item${it.danger ? " danger" : ""}" data-i="${i}">${esc(it.label)}</div>`).join("");
+  ctxMenu.querySelectorAll(".ctx-item").forEach((el) => {
+    el.onclick = (ev) => { ev.stopPropagation(); hideCtxMenu(); items[Number(el.dataset.i)].fn(); };
+  });
+  ctxMenu.classList.remove("hidden");
+  const w = ctxMenu.offsetWidth, h = ctxMenu.offsetHeight;
+  ctxMenu.style.left = `${Math.min(e.clientX, innerWidth - w - 6)}px`;
+  ctxMenu.style.top = `${Math.min(e.clientY, innerHeight - h - 6)}px`;
+}
+
+function showPlaylistContextMenu(e, el) {
+  e.preventDefault();
+  if (el.dataset.source !== "local") return;
+  const id = el.dataset.id, title = el.dataset.title || "Playlist";
+  selectRowForSidebarItem(el);
+  showContextItems(e, [
+    { label: `Delete playlist "${title}"`, danger: true, fn: () => deleteLocalPlaylist(id, title) },
+  ]);
+}
+
+function selectRowForSidebarItem(el) {
+  document.querySelectorAll(".src-item, .src-subitem").forEach((s) => s.classList.remove("selected"));
+  el.classList.add("selected");
+}
+
 function showCtxMenu(e, idx) {
   e.preventDefault();
   const t = STATE.tracks[idx];
@@ -1378,17 +1544,7 @@ function showCtxMenu(e, idx) {
   items.push({ sep: true });
   if (t.artist) items.push({ label: `Show all by ${t.artist}`, fn: () => filterBy(t.artist) });
   if (t.album) items.push({ label: `Show album “${t.album}”`, fn: () => filterBy(t.album) });
-  ctxMenu.innerHTML = items.map((it, i) => it.sep
-    ? '<div class="ctx-sep"></div>'
-    : `<div class="ctx-item${it.danger ? " danger" : ""}" data-i="${i}">${esc(it.label)}</div>`).join("");
-  ctxMenu.querySelectorAll(".ctx-item").forEach((el) => {
-    el.onclick = (ev) => { ev.stopPropagation(); hideCtxMenu(); items[Number(el.dataset.i)].fn(); };
-  });
-  ctxMenu.classList.remove("hidden");
-  // keep the menu on-screen
-  const w = ctxMenu.offsetWidth, h = ctxMenu.offsetHeight;
-  ctxMenu.style.left = `${Math.min(e.clientX, innerWidth - w - 6)}px`;
-  ctxMenu.style.top = `${Math.min(e.clientY, innerHeight - h - 6)}px`;
+  showContextItems(e, items);
 }
 
 // Filter the library down to a search term (artist or album) — iTunes-like
@@ -1397,7 +1553,6 @@ function filterBy(term) {
   selectPane("pane-browse", $("src-music"));
   STATE.view = { type: "library", title: term };
   $("browse-title").textContent = term;
-  $("btn-del-pl").classList.add("hidden");
   $("search").value = term; STATE.search = term;
   STATE.offset = 0; STATE.total = 0; STATE.tracks = []; $("browse-body").innerHTML = "";
   loadMore(true);
@@ -1608,7 +1763,7 @@ function advanceUiToQueuedNext(pos) {
   STATE.nativePlaybackPosition = pos;
   STATE.nativePlaybackLastPosition = pos;
   STATE.nativePlaybackDuration = (Number(t.duration_ms) || 0) / 1000;
-  lcd(t.title, `${t.artist} — ${t.album}`);
+  showPlaybackLcd();
   updateNowPlaying(); updateFullscreenTitle(); prepareVisualizerTrack();
   updatePlaybackDisplay(pos); setPlayIcon(true); renderTracks();
   queueUpNext();
@@ -1663,7 +1818,7 @@ async function playIndex(i, opts = {}) {
     player.src = streamUrl(t);
     player.play().then(syncVisualizerToPlayback).catch(() => {});
   }
-  lcd(t.title, `${t.artist} — ${t.album}`);
+  showPlaybackLcd();
   updateNowPlaying();
   updateFullscreenTitle();
   prepareVisualizerTrack();
@@ -1805,7 +1960,6 @@ $("view-toggle").querySelectorAll("button").forEach((b) => {
     if (STATE.view?.type === "facet") renderFacetList(STATE.view.kind);
   };
 });
-$("hero-play").onclick = () => { if (STATE.tracks.length) playIndex(0); };
 function seekBy(delta) {
   const duration = trackDuration();
   if (STATE.playing < 0 || !duration) return;
@@ -1843,10 +1997,6 @@ function updateMediaPositionState() {
 }
 
 // ---------------------------------------------------------------- playlist actions
-$("btn-play-sel").onclick = () => {
-  const idx = STATE.selected.size ? STATE.tracks.findIndex((t) => STATE.selected.has(t.rating_key)) : 0;
-  playIndex(idx < 0 ? 0 : idx);
-};
 $("btn-sonic").onclick = async () => {
   if (STATE.selected.size !== 1) { lcd("Sonic playlist", "Select exactly one seed track first"); return; }
   const rk = [...STATE.selected][0];
@@ -1885,12 +2035,11 @@ $("btn-add").onclick = () => {
   });
 };
 document.addEventListener("click", (e) => { if (!e.target.closest("#btn-add") && !e.target.closest("#add-menu")) $("add-menu").classList.add("hidden"); });
-$("btn-del-pl").onclick = async () => {
-  if (STATE.view?.type !== "playlist" || STATE.view.source !== "local") return;
-  if (!confirm(`Delete playlist “${STATE.view.title}”? (Tracks stay in your library.)`)) return;
-  await api(`/api/playlist/local/${STATE.view.id.split(":")[1]}`, "DELETE");
+async function deleteLocalPlaylist(id, title) {
+  if (!id || !confirm(`Delete playlist “${title}”? (Tracks stay in your library.)`)) return;
+  await api(`/api/playlist/local/${id.split(":")[1]}`, "DELETE");
   await loadSidebar(); openLibrary();
-};
+}
 
 // ---------------------------------------------------------------- radio & stations
 let radioMode = "artist", radioStationsLoaded = false;
@@ -1986,8 +2135,8 @@ async function selectDevice(el) {
   lcd("iAmped", `${el.dataset.name} — ready`); $("btn-sync").disabled = true;
   try {
     const profile = await api(`/api/device/profile?device_path=${encodeURIComponent(path)}&device_type=${STATE.currentDevice.type}`);
-    if (profile.reserve_mb != null) $("reserve").value = profile.reserve_mb;
-    if (profile.fill_strategy) $("strategy").value = profile.fill_strategy;
+    if (profile.reserve_mb != null) $("reserve").value = reserveDefaultMb(profile.reserve_mb);
+    if (profile.fill_strategy) STATE.fillStrategy = profile.fill_strategy;
     if (profile.transcode_lossless != null) $("transcode").checked = profile.transcode_lossless;
     if (profile.target_bitrate_k) {
       STATE.bitrateByFormat[isIpod ? "aac" : "mp3"] = Number(profile.target_bitrate_k);
@@ -2127,13 +2276,17 @@ function deviceParams() {
   const p = {
     device_path: $("device-path").value.trim(), device_type: t,
     device_name: $("device-name").value.trim() || "iPod",
-    reserve_mb: Number($("reserve").value) || 0, fill_strategy: $("strategy").value,
+    reserve_mb: Number($("reserve").value) || 0, fill_strategy: STATE.fillStrategy || "most_played",
     transcode_lossless: $("transcode").checked, playlist_ids: selectedPlaylists(),
     target_bitrate_k: STATE.bitrateByFormat[t === "ipod" ? "aac" : "mp3"],
     sync_artwork: $("sync-artwork").checked,
     mirror: $("mirror").checked,
   };
-  if (t === "ipod" && $("ipod-format")) p.ipod_format = $("ipod-format").value;
+  if (t === "ipod") {
+    if ($("ipod-format")) p.ipod_format = $("ipod-format").value;
+    if (STATE.currentDevice?.ipod_generation)
+      p.ipod_generation = STATE.currentDevice.ipod_generation;
+  }
   if (STATE.manualKeys) p.mirror = false;
   if (STATE.manualKeys) p.rating_keys = STATE.manualKeys;
   if (STATE.manualPlaylistIds) {
@@ -2165,8 +2318,9 @@ async function plan() {
   $("btn-plan").disabled = true; lcd("Planning", "Choosing tracks that fit…");
   try {
     const r = await api("/api/plan", "POST", p);
-    renderPlan(r); $("btn-sync").disabled = (r.track_count + r.remove_count) === 0 && !r.pending_transaction;
-    lcd("iAmped", `${r.add_count.toLocaleString()} additions, ${r.update_count} updates, ${r.remove_count} removals`);
+    renderPlan(r);
+    $("btn-sync").disabled = (r.track_count + r.remove_count + (r.artwork_update_count || 0)) === 0 && !r.pending_transaction;
+    lcd("iAmped", `${r.add_count.toLocaleString()} additions, ${r.update_count} updates, ${r.artwork_update_count || 0} artwork, ${r.remove_count} removals`);
   } catch (e) { s.className = "status err"; s.textContent = e.message; lcd("iAmped", "Planning failed"); }
   $("btn-plan").disabled = false;
 }
@@ -2177,6 +2331,7 @@ function renderPlan(r) {
   $("plan-summary").innerHTML = `<b>${r.desired_track_count.toLocaleString()}</b> final tracks · <b>${fmtBytes(r.total_bytes)}</b>` +
     ` · <span class="muted">${r.keep_count} kept, ${r.add_count} added` +
     (r.update_count ? `, ${r.update_count} updated` : "") +
+    (r.artwork_update_count ? `, ${r.artwork_update_count} artwork refresh` : "") +
     (r.remove_count ? `, ${r.remove_count} removed (${fmtBytes(r.remove_bytes)})` : "") + `</span>` +
     (r.pending_transaction ? ` · <span class="muted">interrupted sync ready to resume</span>` : "") +
     (r.skipped_for_space ? ` · <span class="muted">${r.skipped_for_space} skipped (full)</span>` : "") + (pls ? `<div style="margin-top:6px;">${pls}</div>` : "");
@@ -2215,7 +2370,7 @@ function renderPlan(r) {
       $("review-all").checked = [...document.querySelectorAll(".review-op")]
         .every((el) => el.checked);
       $("btn-sync").disabled = !document.querySelector(".review-op:checked")
-        && !r.pending_transaction;
+        && !r.pending_transaction && !(r.artwork_update_count || 0);
     };
   });
   document.querySelectorAll(".review-more").forEach((button) => {
@@ -2257,7 +2412,7 @@ async function planDraggedTransfer(offerWizard = true) {
   try {
     const r = await api("/api/plan", "POST", deviceParams());
     renderPlan(r);
-    $("btn-sync").disabled = (r.track_count + r.remove_count) === 0;
+    $("btn-sync").disabled = (r.track_count + r.remove_count + (r.artwork_update_count || 0)) === 0;
     lcd("iAmped", `${r.add_count} additions · ${r.target_bitrate_k} kbps ${r.target_format.toUpperCase()}`);
     if (offerWizard && r.skipped_for_space > 0) openTransferWizard(r);
   } catch (e) {
@@ -2340,6 +2495,7 @@ $("review-all").onchange = () => {
 async function saveDeviceProfile() {
   const p = deviceParams();
   if (!p.device_path) return;
+  p.source_id = STATE.activeSourceId || undefined;
   p.name = $("device-name").value.trim() || STATE.currentDevice?.name || "Device";
   p.autosync = $("autosync").checked;
   p.auto_readback = $("auto-readback").checked;
@@ -2419,6 +2575,7 @@ async function sync() {
   if (!confirm(`${p.mirror ? "Mirror" : "Add"} this selection to ${p.device_path} as a ${p.device_type === "ipod" ? "classic iPod (AAC)" : "USB player (MP3)"}?`)) return;
   $("btn-sync").disabled = true; $("btn-plan").disabled = true; s.textContent = "Starting…";
   showSyncProgress(true); setSyncProgress("Starting…", 0, 0);
+  showActivity("Syncing…", "Preparing device transfer", 0, true);
   try {
     const { job } = await api("/api/sync", "POST", p);
     pollJob(job, {
@@ -2426,23 +2583,23 @@ async function sync() {
         const label = { syncing: "Copying", planning: "Planning", playlists: "Playlists", finalizing: "Finalizing" }[j.phase] || j.phase;
         s.textContent = `${label}: ${j.message || ""}`;
         setSyncProgress(j.phase === "syncing" && j.message ? j.message : `${label}…`, j.done || 0, j.total || 0);
-        lcd(`${label}…`, j.message || "", j.total ? j.done / j.total : 0.1);
+        showActivity(`${label}…`, j.message || "", j.total ? j.done / j.total : 0.1);
       },
       onDone: (j) => {
         s.className = "status ok";
         const r = j.result;
         const total = r.managed_tracks_total ?? r.tracks_total ?? r.tracks ?? r.tracks_added ?? 0;
         s.textContent = `Done — ${total} managed tracks, ${r.tracks_added || 0} added, ${r.tracks_updated || 0} updated, ${r.tracks_removed || 0} removed, ${r.playlists} playlists, ${fmtBytes(r.bytes)}.` + (p.device_type === "ipod" ? " Eject safely before unplugging." : "");
-        lcd("iAmped", `Synced ${r.tracks_added ?? total} tracks`);
+        finishActivity("iAmped", `Synced ${r.tracks_added ?? total} tracks`);
         showSyncProgress(false); $("btn-sync").disabled = false; $("btn-plan").disabled = false;
       },
       onError: (e, job) => {
         showSyncProgress(false); $("btn-sync").disabled = false; $("btn-plan").disabled = false;
         if (job && job.code === "pending_transaction") { offerPendingRecovery(job); return; }
-        s.className = "status err"; s.textContent = e; lcd("iAmped", "Sync failed");
+        s.className = "status err"; s.textContent = e; finishActivity("iAmped", "Sync failed");
       },
     });
-  } catch (e) { s.className = "status err"; s.textContent = e.message; $("btn-sync").disabled = false; $("btn-plan").disabled = false; }
+  } catch (e) { s.className = "status err"; s.textContent = e.message; finishActivity("iAmped", "Sync failed"); $("btn-sync").disabled = false; $("btn-plan").disabled = false; }
 }
 
 // A previous sync was interrupted before it wrote the device database. Its
@@ -2510,16 +2667,17 @@ async function applyReadback() {
   const p = deviceParams(); const s = $("readback-status");
   if (!confirm(`Write ${r.total_plays} plays and ${r.total_rating_changes} ratings to Plex` + ($("rb-reset").checked ? ", then reset the device" : "") + "?")) return;
   $("btn-readback-apply").disabled = true; $("btn-readback").disabled = true;
+  showActivity("Writing to Plex…", "Preparing changes", 0, true);
   try {
     const { job } = await api("/api/device/readback/apply", "POST", {
       device_path: p.device_path, device_type: p.device_type,
       plan: r.plan, reset: $("rb-reset").checked });
     pollJob(job, {
-      onProgress: (j) => { s.className = "status"; s.textContent = j.message || "Applying…"; lcd("Writing to Plex…", j.message || "", j.total ? j.done / j.total : 0.1); },
-      onDone: (j) => { s.className = "status ok"; s.textContent = j.message; lcd("iAmped", j.message);
+      onProgress: (j) => { s.className = "status"; s.textContent = j.message || "Applying…"; showActivity("Writing to Plex…", j.message || "", j.total ? j.done / j.total : 0.1); },
+      onDone: (j) => { s.className = "status ok"; s.textContent = j.message; finishActivity("iAmped", j.message);
         $("btn-readback-apply").classList.add("hidden"); $("readback-wrap").classList.add("hidden");
         $("btn-readback").disabled = false; STATE.readbackPlan = null; refreshStats(); },
-      onError: (e) => { s.className = "status err"; s.textContent = e; lcd("iAmped", "Apply failed"); $("btn-readback-apply").disabled = false; $("btn-readback").disabled = false; },
+      onError: (e) => { s.className = "status err"; s.textContent = e; finishActivity("iAmped", "Apply failed"); $("btn-readback-apply").disabled = false; $("btn-readback").disabled = false; },
     });
   } catch (e) { s.className = "status err"; s.textContent = e.message; $("btn-readback-apply").disabled = false; $("btn-readback").disabled = false; }
 }
@@ -2637,19 +2795,21 @@ async function syncPodcasts() {
   const d = STATE.currentDevice;
   if (!d?.path) { s.className = "status err"; s.textContent = "Pick a device under Devices first."; return; }
   s.className = "status"; s.textContent = `Syncing to ${d.name}…`;
+  showActivity("Syncing podcasts", `Preparing ${d.name}`, 0, true);
   try {
     const { job } = await api("/api/podcasts/sync", "POST", {
       device_path: d.path, device_type: d.type, device_name: d.name,
+      ipod_generation: d.ipod_generation || undefined,
       per_show: Number($("pod-per-show").value) || 3,
       unplayed_only: $("pod-unplayed").checked,
     });
     pollJob(job, {
       onProgress: (j) => {
         s.textContent = j.total ? `${j.message || ""} (${j.done}/${j.total})` : (j.message || "");
-        lcd("Syncing podcasts", j.message || "", j.total ? j.done / j.total : null);
+        showActivity("Syncing podcasts", j.message || "", j.total ? j.done / j.total : null);
       },
-      onDone: (j) => { s.className = "status ok"; s.textContent = j.message; lcd("iAmped", j.message); },
-      onError: (e) => { s.className = "status err"; s.textContent = e; lcd("iAmped", "Podcast sync failed"); },
+      onDone: (j) => { s.className = "status ok"; s.textContent = j.message; finishActivity("iAmped", j.message); },
+      onError: (e) => { s.className = "status err"; s.textContent = e; finishActivity("iAmped", "Podcast sync failed"); },
     });
   } catch (e) { s.className = "status err"; s.textContent = e.message; }
 }
@@ -2666,12 +2826,12 @@ async function pollActiveJobs() {
       WATCHED_JOBS.add(jid);
       if (job.kind === "autosync_job") {
         showSyncProgress(true);
+        showActivity("Auto-sync", job.message || "Device connected — syncing", 0, true);
         pollJob(jid, {
-          onProgress: (j) => setSyncProgress(j.message || "Auto-sync…", j.done, j.total),
-          onDone: (j) => { showSyncProgress(false); lcd("iAmped", j.message || "Auto-sync finished"); loadDevices(); },
-          onError: (e) => { showSyncProgress(false); lcd("Auto-sync failed", e); },
+          onProgress: (j) => { setSyncProgress(j.message || "Auto-sync…", j.done, j.total); showActivity("Auto-sync", j.message || "Syncing…", j.total ? j.done / j.total : 0); },
+          onDone: (j) => { showSyncProgress(false); finishActivity("iAmped", j.message || "Auto-sync finished"); loadDevices(); },
+          onError: (e) => { showSyncProgress(false); finishActivity("Auto-sync failed", e); },
         });
-        lcd("Auto-sync", job.message || "Device connected — syncing");
       } else if (job.kind === "prefetch_job") {
         pollJob(jid, {
           onProgress: (j) => {
@@ -2690,6 +2850,27 @@ setInterval(pollDevices, 3500);   // auto-detect device connect/disconnect
 
 // ---------------------------------------------------------------- wire up
 $("btn-connect").onclick = connect;
+$("source-kind").onchange = () => setSourceKind($("source-kind").value);
+$("source-select").onchange = async () => {
+  const id = $("source-select").value;
+  if (!id) {
+    $("source-name").value = ""; $("baseurl").value = "";
+    $("token").value = ""; $("source-username").value = "";
+    $("source-password").value = "";
+    setSourceKind($("source-kind").value);
+    return;
+  }
+  const source = STATE.sources.find((entry) => entry.id === id);
+  if (source) {
+    $("source-kind").value = source.kind;
+    $("source-name").value = source.name || "";
+    $("baseurl").value = source.baseurl || "";
+    $("token").value = ""; $("source-username").value = "";
+    $("source-password").value = "";
+    setSourceKind(source.kind);
+  }
+  await activateSource(id);
+};
 $("btn-plex-oauth").onclick = startPlexOAuth;
 $("btn-oauth-server").onclick = finishPlexOAuth;
 $("btn-readback").onclick = readbackPreview;
@@ -2801,6 +2982,12 @@ function handleAppMenuAction(action) {
   } else if (action === "inspector" && STATE.currentDevice) openDeviceInspector();
   updateVisualizerMenuState();
 }
+// The macOS menu calls this entry point from pywebview. Keeping menu behavior
+// in the page avoids a separate native command implementation.
+window.iAmpedNativeMenuAction = (action) => {
+  closeAppMenus();
+  handleAppMenuAction(action);
+};
 document.querySelectorAll(".app-menu-button").forEach((button) => {
   button.onclick = (e) => { e.stopPropagation(); toggleAppMenu(button.dataset.menu); };
 });

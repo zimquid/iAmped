@@ -1,22 +1,24 @@
 # iAmped
 
 Builds a music library for **classic iPods and USB MP3 players** from your
-**Plexamp / Plex Media Server** metadata — play counts, ratings and playlists —
-then dynamically fills a device to its free capacity.
+**Plex, Jellyfin, or Kodi** metadata — play counts, ratings and playlists where
+the selected server supports them — then dynamically fills a device to its free
+capacity.
 
-The machine running iAmped, the Plex server, and the music files can all be in
-different places on your network: metadata is read over the Plex HTTP API and
-the actual audio is downloaded over the same API, so no file share is required.
+The machine running iAmped, the media server, and the music files can all be in
+different places on your network: metadata is read over the server API and the
+actual audio is downloaded over the same connection, so no file share is
+required when the server exposes original-file downloads.
 
 ## What it does
 
-1. **Sign in with Plex** and choose a discovered Plex Media Server. A server
-   URL + token can still be entered manually as an optional fallback.
+1. **Add a media source** — sign in with Plex, or connect a Jellyfin or Kodi
+   server directly. Plex URL + token remains an optional manual fallback.
 2. **Build a local library** — caches every track's metadata (plays, rating,
    format, size, duration) and all audio playlists into `~/.iamped/library.db`.
 3. **Pick a target device** — a classic iPod or a USB mass-storage player. The
    app reads the device's *actual free space*.
-4. **Choose content** — select Plex playlists to include and a fill strategy
+4. **Choose content** — select server playlists to include and a fill strategy
    (most-played / top-rated / recently-played / random / alphabetical) for the
    remaining space, or select songs in the library and drag them directly onto
    an iPod/MP3 player in the sidebar.
@@ -77,7 +79,7 @@ the device can be safely ejected from the same screen.
 
 ### Artwork, profiles, matching, and playback
 
-- Plex album artwork is cached once per album. USB players receive embedded
+- Server album artwork is cached once per album. USB players receive embedded
   cover tags plus `cover.jpg`; supported iPods receive native ArtworkDB/ITHMB
   thumbnails.
 - Each device has a stable identity and saved profile for reserve space, fill
@@ -134,7 +136,7 @@ machine):
 build_windows.bat           # Windows -> dist\iAmped.exe
 ```
 
-The build is **portable**: your settings (Plex URL + token), the library cache
+The build is **portable**: your server settings, the library cache
 and downloaded audio are stored in an `iAmped-data/` folder created **next to
 the app** on first run — so you can drop the app on a USB stick and carry your
 configuration with it.
@@ -147,22 +149,30 @@ configuration with it.
 | Portable build | `iAmped-data/` next to the app/exe |
 | `IAMPED_HOME=/path` set | exactly that path |
 
-`config.json` holds the Plex connection details and your last-used sync
-settings; they persist automatically once entered in the UI (or saved via the
-Connect step).
+`config.json` holds saved source connection details and your last-used sync
+settings; they persist automatically once entered in the UI.
 
-## Manual Plex connection (optional)
+## Media sources
 
-The recommended setup is **Sign in with Plex**, which discovers your servers
-and stores the selected server URL and access token automatically. To connect
-manually instead, enter both the Plex Media Server URL and an
-`X-Plex-Token`.
+The recommended Plex setup is **Sign in with Plex**, which discovers your
+servers and stores the selected server URL and access token automatically. A
+Plex URL + `X-Plex-Token` can also be entered manually. Jellyfin accepts an
+access token or a username/password login. Kodi uses its JSON-RPC web-server
+endpoint and may require web-server credentials.
+
+Jellyfin supports music-library enumeration, playlists, original downloads,
+artwork, and play-state updates. Kodi can enumerate its music library and sync
+when its `Files.Download` endpoint returns an HTTP download; otherwise iAmped
+will explain that the Kodi file-download endpoint or a local music-share mount
+is needed. Plex-only features such as Sonic radio, ingest-back, and current
+video sync are hidden for the other providers.
 
 ## Project layout
 
 ```
 iamped/
-  plex_client.py     Plex API: metadata, playlists, downloads
+  providers.py       Plex, Jellyfin, and Kodi provider boundary
+  plex_client.py     Plex API implementation and Plex-only features
   library.py         SQLite metadata cache (the reusable pool)
   filler.py          capacity-aware track selection
   artwork.py         Plex artwork cache + portable tag embedding

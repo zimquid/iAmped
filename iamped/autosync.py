@@ -31,13 +31,15 @@ def _profile_sync_params(dev, path: str, dtype: str, profile: dict) -> dict:
         "device_path": path,
         "device_type": dtype,
         "device_name": profile.get("name") or dev.name,
-        "reserve_mb": profile.get("reserve_mb", 200),
+        "reserve_mb": profile.get("reserve_mb", 20),
         "fill_strategy": profile.get("fill_strategy", "most_played"),
         "transcode_lossless": profile.get("transcode_lossless", True),
         "sync_artwork": profile.get("sync_artwork", True),
         "mirror": profile.get("mirror", True),
         "playlist_ids": profile.get("playlist_ids", []),
     }
+    if dtype == "ipod":
+        params["ipod_generation"] = getattr(dev, "ipod_generation", "") or ""
     if profile.get("target_bitrate_k"):
         params["target_bitrate_k"] = profile["target_bitrate_k"]
     if profile.get("ipod_format"):
@@ -118,6 +120,9 @@ def _scan_once() -> None:
         profile = device_management.profiles().get(did) or {}
         if not profile.get("autosync"):
             continue
+        active_source = config.active_source(config.load()) or {}
+        if profile.get("source_id") and profile.get("source_id") != active_source.get("id"):
+            continue  # profiles never silently sync content from another server
         if any(j.get("status") == "running" and j.get("device_path") == path
                for j in JOBS.values()):
             continue                          # something already works on it

@@ -1,4 +1,4 @@
-"""Local SQLite catalog of Plex metadata + bookkeeping for cached audio.
+"""Local source-aware catalog + bookkeeping for cached audio.
 
 This is the reusable "pool": build it once from Plex, then plan/sync many
 devices from it without re-querying the server every time.
@@ -15,6 +15,7 @@ from .plex_client import PlaylistMeta, TrackMeta
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks (
     rating_key   TEXT PRIMARY KEY,
+    source_id    TEXT DEFAULT 'plex', remote_id TEXT,
     title        TEXT, artist TEXT, album TEXT, album_artist TEXT,
     genre        TEXT, year INTEGER, track_number INTEGER, disc_number INTEGER,
     duration_ms  INTEGER, view_count INTEGER DEFAULT 0,
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS tracks (
 );
 CREATE TABLE IF NOT EXISTS playlists (
     plex_id TEXT PRIMARY KEY, title TEXT, smart INTEGER,
-    duration_ms INTEGER, item_count INTEGER
+    duration_ms INTEGER, item_count INTEGER, source_id TEXT DEFAULT 'plex'
 );
 CREATE TABLE IF NOT EXISTS playlist_items (
     plex_id TEXT, rating_key TEXT, position INTEGER,
@@ -34,7 +35,8 @@ CREATE TABLE IF NOT EXISTS playlist_items (
 );
 CREATE TABLE IF NOT EXISTS local_playlists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT, kind TEXT DEFAULT 'manual', created INTEGER, rules TEXT
+    title TEXT, kind TEXT DEFAULT 'manual', created INTEGER, rules TEXT,
+    source_id TEXT DEFAULT 'plex'
 );
 CREATE TABLE IF NOT EXISTS local_playlist_items (
     playlist_id INTEGER, rating_key TEXT, position INTEGER,
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_views ON tracks(view_count DESC);
 CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(user_rating DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source_id);
 """
 
 BROWSE_ORDER = {
@@ -71,7 +74,7 @@ BROWSE_ORDER = {
 }
 
 TRACK_COLS = [
-    "rating_key", "title", "artist", "album", "album_artist", "genre", "year",
+    "rating_key", "source_id", "remote_id", "title", "artist", "album", "album_artist", "genre", "year",
     "track_number", "disc_number", "duration_ms", "view_count", "user_rating",
     "last_viewed_at", "container", "codec", "bitrate", "file_size",
     "part_key", "server_file", "album_key", "album_thumb", "artist_thumb",
@@ -88,9 +91,16 @@ class Library:
             c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
             existing = {r["name"] for r in c.execute("PRAGMA table_info(tracks)")}
-            for name in ("album_key", "album_thumb", "artist_thumb"):
+            for name in ("album_key", "album_thumb", "artist_thumb", "source_id", "remote_id"):
                 if name not in existing:
-                    c.execute(f"ALTER TABLE tracks ADD COLUMN {name} TEXT")
+                    default = " DEFAULT 'plex'" if name == "source_id" else ""
+                    c.execute(f"ALTER TABLE tracks ADD COLUMN {name} TEXT{default}")
+            existing_playlists = {r["name"] for r in c.execute("PRAGMA table_info(playlists)")}
+            if "source_id" not in existing_playlists:
+                c.execute("ALTER TABLE playlists ADD COLUMN source_id TEXT DEFAULT 'plex'")
+            existing_local = {r["name"] for r in c.execute("PRAGMA table_info(local_playlists)")}
+            if "source_id" not in existing_local:
+                c.execute("ALTER TABLE local_playlists ADD COLUMN source_id TEXT DEFAULT 'plex'")
             self._fts = self._ensure_fts(c)
 
     @staticmethod
@@ -128,6 +138,14 @@ END;
             return False
 
     @staticmethod
+    def _malformed_db_error(exc: Exception) -> bool:
+        return "database disk image is malformed" in str(exc).lower()
+
+    def _rebuild_fts(self) -> None:
+        with self._conn() as c:
+            c.execute("INSERT INTO tracks_fts(tracks_fts) VALUES ('rebuild')")
+
+    @staticmethod
     def _fts_query(search: str) -> str:
         """Turn free text into a prefix-match FTS5 query ("dark si" finds
         Dark Side …). Terms are quoted so feed titles with quotes/operators
@@ -157,19 +175,29 @@ END;
             f"ON CONFLICT(rating_key) DO UPDATE SET "
             + ",".join(f"{c}=excluded.{c}" for c in TRACK_COLS if c != "rating_key")
         )
-        with self._conn() as c:
-            c.executemany(sql, rows)
+        try:
+            with self._conn() as c:
+                c.executemany(sql, rows)
+        except sqlite3.DatabaseError as exc:
+            if not getattr(self, "_fts", False) or not self._malformed_db_error(exc):
+                raise
+            self._rebuild_fts()
+            with self._conn() as c:
+                c.executemany(sql, rows)
         return len(rows)
 
-    def replace_playlists(self, playlists: list[PlaylistMeta]) -> int:
+    def replace_playlists(self, playlists: list[PlaylistMeta], source_id: str = "plex") -> int:
         with self._conn() as c:
-            c.execute("DELETE FROM playlists")
-            c.execute("DELETE FROM playlist_items")
+            old_ids = [r["plex_id"] for r in c.execute(
+                "SELECT plex_id FROM playlists WHERE source_id=?", (source_id,))]
+            if old_ids:
+                c.executemany("DELETE FROM playlist_items WHERE plex_id=?", [(pid,) for pid in old_ids])
+            c.execute("DELETE FROM playlists WHERE source_id=?", (source_id,))
             for pl in playlists:
                 c.execute(
-                    "INSERT INTO playlists VALUES (?,?,?,?,?)",
+                    "INSERT INTO playlists (plex_id,title,smart,duration_ms,item_count,source_id) VALUES (?,?,?,?,?,?)",
                     (pl.plex_id, pl.title, int(pl.smart), pl.duration_ms,
-                     len(pl.item_keys)),
+                     len(pl.item_keys), source_id),
                 )
                 c.executemany(
                     "INSERT OR REPLACE INTO playlist_items VALUES (?,?,?)",
@@ -188,19 +216,25 @@ END;
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                       (key, str(value)))
 
-    def track_count(self) -> int:
+    def track_count(self, source_id: str | None = None) -> int:
         with self._conn() as c:
-            return c.execute("SELECT COUNT(*) n FROM tracks").fetchone()["n"]
+            if source_id is None:
+                return c.execute("SELECT COUNT(*) n FROM tracks").fetchone()["n"]
+            return c.execute("SELECT COUNT(*) n FROM tracks WHERE source_id=?", (source_id,)).fetchone()["n"]
 
-    def prune_missing(self, keep_keys: Iterable[str]) -> int:
+    def prune_missing(self, keep_keys: Iterable[str], source_id: str | None = None) -> int:
         """Delete tracks not in keep_keys — call after a *full* rebuild so
         tracks removed from Plex don't linger in the local catalog forever."""
         with self._conn() as c:
             c.execute("CREATE TEMP TABLE keep (rating_key TEXT PRIMARY KEY)")
             c.executemany("INSERT OR IGNORE INTO keep VALUES (?)",
                           [(str(k),) for k in keep_keys])
-            cur = c.execute(
-                "DELETE FROM tracks WHERE rating_key NOT IN (SELECT rating_key FROM keep)")
+            sql = "DELETE FROM tracks WHERE rating_key NOT IN (SELECT rating_key FROM keep)"
+            args: tuple = ()
+            if source_id is not None:
+                sql += " AND source_id=?"
+                args = (source_id,)
+            cur = c.execute(sql, args)
             c.execute("DROP TABLE keep")
         return cur.rowcount
 
@@ -212,23 +246,27 @@ END;
             )
 
     # ---- reading ----------------------------------------------------------
-    def stats(self) -> dict:
+    def stats(self, source_id: str | None = None) -> dict:
         with self._conn() as c:
+            where = " WHERE source_id=?" if source_id else ""
+            args = (source_id,) if source_id else ()
             t = c.execute("SELECT COUNT(*) n, COALESCE(SUM(file_size),0) sz, "
-                          "COALESCE(SUM(duration_ms),0) dur FROM tracks").fetchone()
+                          f"COALESCE(SUM(duration_ms),0) dur FROM tracks{where}", args).fetchone()
             cached = c.execute("SELECT COUNT(*) n FROM tracks "
-                               "WHERE cached_path IS NOT NULL").fetchone()
-            pl = c.execute("SELECT COUNT(*) n FROM playlists").fetchone()
+                               f"{where}{' AND' if where else ' WHERE'} cached_path IS NOT NULL", args).fetchone()
+            pl = c.execute(f"SELECT COUNT(*) n FROM playlists{where}", args).fetchone()
         return {
             "tracks": t["n"], "total_bytes": t["sz"], "total_ms": t["dur"],
             "cached": cached["n"], "playlists": pl["n"],
         }
 
-    def playlists(self) -> list[dict]:
+    def playlists(self, source_id: str | None = None) -> list[dict]:
         with self._conn() as c:
+            where = " WHERE source_id=?" if source_id else ""
+            args = (source_id,) if source_id else ()
             return [dict(r) for r in c.execute(
-                "SELECT plex_id, title, smart, duration_ms, item_count "
-                "FROM playlists ORDER BY title COLLATE NOCASE").fetchall()]
+                "SELECT plex_id, title, smart, duration_ms, item_count, source_id "
+                f"FROM playlists{where} ORDER BY title COLLATE NOCASE", args).fetchall()]
 
     def playlist_track_keys(self, plex_id: str) -> list[str]:
         with self._conn() as c:
@@ -249,13 +287,19 @@ END;
                     out[r["rating_key"]] = dict(r)
         return out
 
-    def ordered_tracks(self, strategy: str, limit: Optional[int] = None) -> list[dict]:
+    def ordered_tracks(self, strategy: str, limit: Optional[int] = None,
+                       source_id: str | None = None) -> list[dict]:
         order = BROWSE_ORDER.get(strategy, "view_count DESC")
-        sql = f"SELECT * FROM tracks ORDER BY {order}"
+        sql = "SELECT * FROM tracks"
+        args: list = []
+        if source_id is not None:
+            sql += " WHERE source_id=?"
+            args.append(source_id)
+        sql += f" ORDER BY {order}"
         if limit:
             sql += f" LIMIT {int(limit)}"
         with self._conn() as c:
-            return [dict(r) for r in c.execute(sql).fetchall()]
+            return [dict(r) for r in c.execute(sql, args).fetchall()]
 
     def search_candidates(self, artist: str, title: str, limit: int = 20) -> list[dict]:
         """Small candidate set for device-file reconciliation."""
@@ -276,9 +320,13 @@ END;
                       offset: int = 0, limit: int = 200,
                       min_rating: float = 0, min_plays: int = 0,
                       artist: str = "", album: str = "",
-                      genre: str = "", album_artist: str = "") -> dict:
+                      genre: str = "", album_artist: str = "",
+                      source_id: str | None = None) -> dict:
         order = BROWSE_ORDER.get(sort, BROWSE_ORDER["artist"])
         where, params = [], []
+        if source_id is not None:
+            where.append("source_id = ?")
+            params.append(source_id)
         if search:
             fts = self._fts_query(search) if getattr(self, "_fts", False) else ""
             if fts:
@@ -308,33 +356,34 @@ END;
                 params + [int(limit), int(offset)]).fetchall()
         return {"total": total, "tracks": [dict(r) for r in rows]}
 
-    def facets(self) -> dict[str, list[dict]]:
+    def facets(self, source_id: str | None = None) -> dict[str, list[dict]]:
         def rows_for(column: str, order: str) -> list[dict]:
             with self._conn() as c:
+                source_where = " AND source_id=?" if source_id else ""
                 return [dict(r) for r in c.execute(
                     f"SELECT {column} name, COUNT(*) count "
-                    f"FROM tracks WHERE COALESCE({column}, '') != '' "
-                    f"GROUP BY {column} COLLATE NOCASE ORDER BY {order}"
-                ).fetchall()]
+                    f"FROM tracks WHERE COALESCE({column}, '') != ''{source_where} "
+                    f"GROUP BY {column} COLLATE NOCASE ORDER BY {order}",
+                    (source_id,) if source_id else ()).fetchall()]
 
         with self._conn() as c:
+            source_where = " AND source_id=?" if source_id else ""
+            args = (source_id,) if source_id else ()
             albums = [dict(r) for r in c.execute(
                 "SELECT album name, album_artist artist, COUNT(*) count, "
                 "MIN(year) year, MIN(album_thumb) album_thumb "
-                "FROM tracks WHERE COALESCE(album, '') != '' "
+                f"FROM tracks WHERE COALESCE(album, '') != ''{source_where} "
                 "GROUP BY album COLLATE NOCASE, album_artist COLLATE NOCASE "
-                "ORDER BY album COLLATE NOCASE"
-            ).fetchall()]
+                "ORDER BY album COLLATE NOCASE", args).fetchall()]
             # Alias the artist image to album_thumb so the facet tiles render it
             # with the same code path as albums. MAX(NULLIF(...)) picks a
             # populated thumb over the blanks left by tracks with no artist art.
             artists = [dict(r) for r in c.execute(
                 "SELECT artist name, COUNT(*) count, "
                 "MAX(NULLIF(artist_thumb, '')) album_thumb "
-                "FROM tracks WHERE COALESCE(artist, '') != '' "
+                f"FROM tracks WHERE COALESCE(artist, '') != ''{source_where} "
                 "GROUP BY artist COLLATE NOCASE "
-                "ORDER BY artist COLLATE NOCASE"
-            ).fetchall()]
+                "ORDER BY artist COLLATE NOCASE", args).fetchall()]
         return {
             "artists": artists,
             "albums": albums,
@@ -342,29 +391,33 @@ END;
         }
 
     def query_keys(self, sort: str, limit: int, min_rating: float = 0,
-                   min_plays: int = 0) -> list[str]:
-        res = self.browse_tracks("", sort, 0, limit, min_rating, min_plays)
+                   min_plays: int = 0, source_id: str | None = None) -> list[str]:
+        res = self.browse_tracks("", sort, 0, limit, min_rating, min_plays,
+                                 source_id=source_id)
         return [t["rating_key"] for t in res["tracks"]]
 
     # ---- local (custom) playlists ----------------------------------------
     def create_local_playlist(self, title: str, kind: str, created: int,
-                              rules: str, rating_keys: list[str]) -> int:
+                              rules: str, rating_keys: list[str],
+                              source_id: str = "plex") -> int:
         with self._conn() as c:
             cur = c.execute(
-                "INSERT INTO local_playlists (title, kind, created, rules) VALUES (?,?,?,?)",
-                (title, kind, created, rules))
+                "INSERT INTO local_playlists (title, kind, created, rules, source_id) VALUES (?,?,?,?,?)",
+                (title, kind, created, rules, source_id))
             pid = cur.lastrowid
             c.executemany(
                 "INSERT INTO local_playlist_items VALUES (?,?,?)",
                 [(pid, rk, i) for i, rk in enumerate(rating_keys)])
         return pid
 
-    def local_playlists(self) -> list[dict]:
+    def local_playlists(self, source_id: str | None = None) -> list[dict]:
         with self._conn() as c:
+            where = " WHERE lp.source_id=?" if source_id else ""
+            args = (source_id,) if source_id else ()
             return [dict(r) for r in c.execute(
                 "SELECT lp.id, lp.title, lp.kind, "
                 "(SELECT COUNT(*) FROM local_playlist_items i WHERE i.playlist_id=lp.id) n "
-                "FROM local_playlists lp ORDER BY lp.created DESC").fetchall()]
+                f"FROM local_playlists lp{where} ORDER BY lp.created DESC", args).fetchall()]
 
     def local_playlist_track_keys(self, pid: int) -> list[str]:
         with self._conn() as c:
@@ -395,15 +448,15 @@ END;
             c.execute("DELETE FROM local_playlist_items WHERE playlist_id=?", (pid,))
 
     # ---- unified playlist access (Plex + local) --------------------------
-    def all_playlists(self) -> list[dict]:
-        plex = [{"id": p["plex_id"], "title": p["title"], "smart": bool(p["smart"]),
-                 "item_count": p["item_count"], "source": "plex"}
-                for p in self.playlists()]
+    def all_playlists(self, source_id: str | None = None) -> list[dict]:
+        remote = [{"id": p["plex_id"], "title": p["title"], "smart": bool(p["smart"]),
+                   "item_count": p["item_count"], "source": p.get("source_id", "plex")}
+                  for p in self.playlists(source_id)]
         local = [{"id": f"local:{r['id']}", "title": r["title"],
                   "smart": r["kind"] != "manual", "item_count": r["n"],
                   "source": "local", "kind": r["kind"]}
-                 for r in self.local_playlists()]
-        return local + plex
+                 for r in self.local_playlists(source_id)]
+        return local + remote
 
     def playlist_track_keys_any(self, pid: str) -> list[str]:
         if str(pid).startswith("local:"):

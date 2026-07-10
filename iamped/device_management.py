@@ -70,6 +70,7 @@ def save_profile(path: str, dtype: str, values: dict) -> dict:
         "name", "device_type", "reserve_mb", "fill_strategy",
         "transcode_lossless", "target_bitrate_k",
         "sync_artwork", "mirror", "playlist_ids",
+        "source_id",             # catalog/source the playlist ids belong to
         "transport", "layout",   # override the auto-detected sync mode
         "autosync",              # sync this profile automatically on connect
         "auto_readback",         # push device plays/ratings to Plex on connect

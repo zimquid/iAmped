@@ -110,6 +110,9 @@ def read_ipod_library(device_path: str) -> dict:
             "exists": bool(path and os.path.exists(path)),
             "origin": origin,
             "rating_key": rating_key,
+            "artwork_count": r.get("artwork_count") or 0,
+            "artwork_size": r.get("artwork_size") or 0,
+            "mhii_link": r.get("mhii_link") or 0,
             # video typing so the UI can split Music vs Videos and group TV
             "media": "video" if is_video else "audio",
             "mediatype": mediatype,

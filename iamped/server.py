@@ -11,14 +11,14 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import cache, config, playback
+from . import cache, config, playback, providers
 from .library import Library
 from .sync.base import aac_codec, have_ffmpeg, is_apple_grade_aac
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 app = Flask(__name__, static_folder=None)
 
-_state: dict = {"server": None}
+_state: dict = {"server": None, "source_id": None}
 JOBS: dict[str, dict] = {}
 
 
@@ -28,12 +28,13 @@ def _lib() -> Library:
 
 
 def get_server():
-    from . import plex_client
     cfg = config.load()
-    if not cfg["plex_baseurl"] or not cfg["plex_token"]:
-        raise RuntimeError("Plex is not configured yet.")
-    if _state["server"] is None:
-        _state["server"] = plex_client.connect(cfg["plex_baseurl"], cfg["plex_token"])
+    source = config.active_source(cfg)
+    if source is None:
+        raise RuntimeError("No media server is configured yet.")
+    if _state["server"] is None or _state.get("source_id") != source.get("id"):
+        _state["server"] = providers.connect(source)
+        _state["source_id"] = source.get("id")
     return _state["server"]
 
 
@@ -84,6 +85,13 @@ def static_files(fname):
 @app.get("/api/config")
 def api_get_config():
     cfg = config.load()
+    # The frontend only needs connection state, never reusable credentials.
+    # Keep legacy Plex fields blank too; old portable config files remain
+    # readable by the backend through config.load().
+    cfg.pop("plex_token", None)
+    cfg["sources"] = [providers.public_source(
+        source, source.get("id") == cfg.get("active_source_id"))
+        for source in cfg.get("sources", [])]
     cfg["has_ffmpeg"] = have_ffmpeg()
     cfg["native_playback"] = playback.PLAYER.status()
     # AAC encoder quality: 'apple_grade' → libfdk_aac/aac_at (clean on old

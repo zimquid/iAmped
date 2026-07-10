@@ -42,6 +42,10 @@ class TrackMeta:
     album_key: str = ""
     album_thumb: str = ""
     artist_thumb: str = ""            # grandparentThumb — image for the artist
+    # Provider-neutral identity. ``rating_key`` remains the catalog/device key
+    # for backward compatibility; remote_id is the server's native item id.
+    source_id: str = "plex"
+    remote_id: str = ""
 
 
 @dataclass
@@ -430,6 +434,8 @@ class PlaylistMeta:
     smart: bool
     duration_ms: int
     item_keys: list[str] = field(default_factory=list)   # ordered rating keys
+    source_id: str = "plex"
+    remote_id: str = ""
 
 
 def list_playlists(server: PlexServer) -> list[PlaylistMeta]:

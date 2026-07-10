@@ -7,7 +7,7 @@ import os
 from flask import Blueprint, jsonify, request, send_file
 
 from .. import (config, device_management, ingest, inventory, matcher,
-                readback)
+                readback, providers)
 from ..server import JOBS, _lib, get_server, start_job
 from ..sync import device_state, itunesdb, otg
 
@@ -225,7 +225,10 @@ def api_plex_music_locations():
     """Server-side folder paths for each music section, so the UI can hint which
     folder Plex actually watches when picking an ingest destination."""
     try:
-        server = get_server()
+        connection = providers.normalize(get_server())
+        if connection.kind != "plex":
+            return jsonify({"sections": []})
+        server = connection.client
         out = []
         for s in server.library.sections():
             if s.type == "artist":
@@ -274,9 +277,11 @@ def _ingest_job(job, p):
                           else f"Waiting for Plex to scan… {done}/{total}")
 
     with device_management.device_lock(path, dtype):
-        server = get_server()
+        connection = providers.normalize(get_server())
+        if connection.kind != "plex":
+            raise RuntimeError("Device ingest-back is currently available for Plex only.")
         job["result"] = ingest.apply(
-            server, _lib(), path, dtype, p.get("items", []),
+            connection.client, _lib(), path, dtype, p.get("items", []),
             ingest_dir, section, progress=prog, batch_remove=batch_remove)
     r = job["result"]
     job["message"] = (
@@ -482,7 +487,9 @@ def api_device_otg_import():
         return jsonify({"error": "None of the On-The-Go tracks matched the library."}), 400
     title = (p.get("title") or "").strip() or plan["title"]
     lib = _lib()
-    pid = lib.create_local_playlist(title, "otg", int(_time.time()), "", keys)
+    pid = lib.create_local_playlist(
+        title, "otg", int(_time.time()), "", keys,
+        providers.normalize(get_server()).source_id)
     plex_key = None
     plex_error = None
     if p.get("to_plex"):
@@ -499,7 +506,10 @@ def api_device_otg_import():
 
 def plex_client_create(title: str, keys: list[str]):
     from .. import plex_client
-    return plex_client.create_playlist(get_server(), title, keys)
+    connection = providers.normalize(get_server())
+    if connection.kind != "plex":
+        raise RuntimeError("Creating a server playlist is currently available for Plex only.")
+    return plex_client.create_playlist(connection.client, title, keys)
 
 
 @bp.post("/api/device/readback")

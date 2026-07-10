@@ -9,12 +9,14 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from . import config, plex_client
+from . import config, providers
 
 
 def album_identity(track: dict) -> str:
     key = str(track.get("album_key") or "").strip()
-    raw = f"plex:{key}" if key else "\0".join((
+    source = str(track.get("source_id") or "plex")
+    raw = f"{source}:{key}" if key else "\0".join((
+        source,
         track.get("album_artist") or track.get("artist") or "",
         track.get("album") or "",
     ))
@@ -32,7 +34,8 @@ def materialize(server, track: dict) -> str | None:
         return None
     path = cache_path(track)
     if not (os.path.exists(path) and os.path.getsize(path) > 0):
-        plex_client.download_image(server, thumb, path)
+        connection = providers.normalize(server)
+        connection.provider.download_image(connection, thumb, path)
     try:
         with Image.open(path) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")

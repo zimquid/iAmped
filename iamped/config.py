@@ -76,13 +76,18 @@ STABLE_DB = STABLE_DIR / "library.db"
 # server-side selections that would otherwise force a reconnect and re-scan.
 LOGIN_KEYS = (
     "plex_baseurl", "plex_token", "plex_client_id",
-    "music_section", "ingest_dir", "ingest_section",
+    "music_section", "ingest_dir", "ingest_section", "sources",
+    "active_source_id",
 )
 
 DEFAULTS: dict[str, Any] = {
     "plex_baseurl": "",
     "plex_token": "",
     "plex_client_id": "",        # stable device identity used by Plex OAuth
+    # ``plex_*`` remains for legacy/OAuth compatibility. New provider
+    # connections live in sources and the active source scopes catalog/sync.
+    "sources": [],
+    "active_source_id": "plex",
     "music_section": "",        # name of the Plex music library section
     "ingest_dir": "",           # writable, Plex-watched folder for ingest-back
     "ingest_section": "",       # music section to scan after ingest (defaults to music_section)
@@ -90,7 +95,7 @@ DEFAULTS: dict[str, Any] = {
     # last-used sync settings, remembered for convenience
     "last_device_path": "",
     "last_device_type": "massstorage",   # "massstorage" | "ipod"
-    "reserve_mb": 200,
+    "reserve_mb": 20,
     "fill_strategy": "most_played",
     "transcode_lossless": True,
     "aac_bitrate_k": 256,
@@ -124,21 +129,92 @@ def load() -> dict[str, Any]:
             pass
     # Restore the login from the stable cross-build cache when the portable
     # config doesn't carry it — e.g. right after a rebuild wiped the app dir.
-    if STABLE_DIR != APP_DIR and not cfg.get("plex_token"):
+    if STABLE_DIR != APP_DIR and not cfg.get("plex_token") and not cfg.get("sources"):
         creds = _read_credentials()
         for key in LOGIN_KEYS:
             if not cfg.get(key) and creds.get(key):
                 cfg[key] = creds[key]
-    return cfg
+    return _normalize_sources(cfg)
 
 
 def save(updates: dict[str, Any]) -> dict[str, Any]:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     cfg = load()
     cfg.update({k: v for k, v in updates.items() if k in DEFAULTS})
+    cfg = _normalize_sources(cfg)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
     _mirror_credentials(cfg)
     return cfg
+
+
+def _normalize_sources(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Represent the historic Plex login as the default source.
+
+    Keeping ``plex`` as its original id means existing SQLite rows, cache file
+    names and device manifests remain valid while newer server types receive
+    namespaced catalog keys.
+    """
+    raw = cfg.get("sources")
+    sources = [dict(source) for source in raw if isinstance(source, dict)] \
+        if isinstance(raw, list) else []
+    if not sources and (cfg.get("plex_baseurl") or cfg.get("plex_token")):
+        sources = [{
+            "id": "plex", "kind": "plex", "name": "Plex",
+            "baseurl": cfg.get("plex_baseurl", ""),
+            "token": cfg.get("plex_token", ""),
+            "device_id": cfg.get("plex_client_id", ""),
+        }]
+    clean = []
+    for source in sources:
+        kind = str(source.get("kind") or "plex").lower()
+        sid = str(source.get("id") or kind).strip() or kind
+        clean.append({
+            "id": sid, "kind": kind,
+            "name": str(source.get("name") or ""),
+            "baseurl": str(source.get("baseurl") or ""),
+            "token": str(source.get("token") or ""),
+            "username": str(source.get("username") or ""),
+            "password": str(source.get("password") or ""),
+            "user_id": str(source.get("user_id") or ""),
+            "device_id": str(source.get("device_id") or ""),
+        })
+    cfg["sources"] = clean
+    active = str(cfg.get("active_source_id") or "")
+    if clean and active not in {source["id"] for source in clean}:
+        cfg["active_source_id"] = clean[0]["id"]
+    return cfg
+
+
+def active_source(cfg: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    cfg = cfg or load()
+    active = str(cfg.get("active_source_id") or "")
+    return next((source for source in cfg.get("sources", [])
+                 if source.get("id") == active), None)
+
+
+def upsert_source(source: dict[str, Any], active: bool = True) -> dict[str, Any]:
+    """Save one provider source without exposing its secret through APIs."""
+    cfg = load()
+    sources = [s for s in cfg.get("sources", []) if s.get("id") != source.get("id")]
+    sources.append(dict(source))
+    updates: dict[str, Any] = {"sources": sources}
+    if active:
+        updates["active_source_id"] = source.get("id")
+    # Preserve the old Plex OAuth/manual fields for the legacy entrypoints.
+    if source.get("kind") == "plex":
+        updates.update({
+            "plex_baseurl": source.get("baseurl", ""),
+            "plex_token": source.get("token", ""),
+            "plex_client_id": source.get("device_id") or cfg.get("plex_client_id", ""),
+        })
+    return save(updates)
+
+
+def set_active_source(source_id: str) -> dict[str, Any]:
+    cfg = load()
+    if source_id not in {str(s.get("id")) for s in cfg.get("sources", [])}:
+        raise ValueError("Unknown media source.")
+    return save({"active_source_id": source_id})
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +236,8 @@ def _mirror_credentials(cfg: dict[str, Any]) -> None:
     """
     if STABLE_DIR == APP_DIR:
         return
-    if not cfg.get("plex_token"):
+    if not cfg.get("plex_token") and not any(
+            s.get("token") or s.get("username") for s in cfg.get("sources", [])):
         return
     creds = {key: cfg.get(key, "") for key in LOGIN_KEYS}
     try:

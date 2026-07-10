@@ -93,6 +93,27 @@ class DeviceFeatureTests(unittest.TestCase):
                 ipod_artwork.validate(td),
                 {"datasets": 3, "images": 1, "thumbnails": 4})
 
+    def test_native_artwork_uses_generation_hint_when_usb_match_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source.m4a"
+            source.write_bytes(b"audio")
+            cover = root / "cover.jpg"
+            Image.new("RGB", (320, 320), (40, 160, 220)).save(cover, "JPEG")
+            with patch.object(usbdetect, "match", return_value=None):
+                backend = ITunesDBBackend(
+                    td, "Nano", ipod_generation="iPod nano (1st generation)")
+            backend.prepare()
+            backend.add_track(
+                audio_track("hint"), str(source), ".m4a", str(cover))
+            backend.finalize()
+            rows = read_tracks_full(
+                (root / "iPod_Control/iTunes/iTunesDB").read_bytes())
+            self.assertEqual(rows[0]["artwork_count"], 1)
+            self.assertEqual(
+                ipod_artwork.validate(td),
+                {"datasets": 3, "images": 1, "thumbnails": 2})
+
     def test_corrupt_artworkdb_never_blocks_music(self):
         # A device carrying an ArtworkDB our validator rejects must still get a
         # complete iTunesDB: artwork is cosmetic, and if a failed art write

@@ -37,7 +37,7 @@
       <div class="tbtn" id="t-prev"><svg viewBox="0 0 16 16"><path d="M5 3v10L1 8zM6 8l8-5v10z"/></svg></div>
       <div class="tbtn" id="t-play"><svg viewBox="0 0 16 16"><path d="M3 2l11 6L3 14z"/></svg></div>
       <div class="tbtn" id="t-next"><svg viewBox="0 0 16 16"><path d="M11 3v10l4-5zM10 8L2 3v10z"/></svg></div>
-      <div class="tbtn mode" id="t-shuffle" title="Shuffle"><svg viewBox="0 0 16 16"><path d="M2 4h2.5c1.4 0 2.5 1.1 3.5 2.6C9.1 4.9 10.4 4 12 4h1.3L11.8 2.5 13 1.3 16 4l-3 2.7-1.2-1.2L13.3 4H12c-1.1 0-2 .8-3 2.6l-.5.8-.5-.8C7 4.8 6 4 4.5 4H2zM2 12h2.5c1.5 0 2.5-.8 3.5-2.6l.5-.8.5.8c1 1.8 1.9 2.6 3 2.6h1.3l-1.5-1.5L13 9.3l3 2.7-3 2.7-1.2-1.2 1.5-1.5H12c-1.6 0-2.9-.9-4-2.6C7 10.9 5.9 12 4.5 12z"/></svg></div>
+      <div class="tbtn mode" id="t-shuffle" title="Shuffle: off" aria-label="Shuffle" aria-pressed="false"><svg viewBox="0 0 512 512" aria-hidden="true"><!-- Font Awesome Free 7.3.0 by Fonticons, Inc. https://fontawesome.com License: CC BY 4.0 --><path d="M403.8 34.4c12-5 25.7-2.2 34.9 6.9l64 64c6 6 9.4 14.1 9.4 22.6s-3.4 16.6-9.4 22.6l-64 64c-9.2 9.2-22.9 11.9-34.9 6.9S384 204.9 384 192l0-32-32 0c-10.1 0-19.6 4.7-25.6 12.8l-32.4 43.2-40-53.3 21.2-28.3C293.3 110.2 321.8 96 352 96l32 0 0-32c0-12.9 7.8-24.6 19.8-29.6zM154 296l40 53.3-21.2 28.3C154.7 401.8 126.2 416 96 416l-64 0c-17.7 0-32-14.3-32-32s14.3-32 32-32l64 0c10.1 0 19.6-4.7 25.6-12.8L154 296zM438.6 470.6c-9.2 9.2-22.9 11.9-34.9 6.9S384 460.9 384 448l0-32-32 0c-30.2 0-58.7-14.2-76.8-38.4L121.6 172.8c-6-8.1-15.5-12.8-25.6-12.8l-64 0c-17.7 0-32-14.3-32-32S14.3 96 32 96l64 0c30.2 0 58.7 14.2 76.8 38.4L326.4 339.2c6 8.1 15.5 12.8 25.6 12.8l32 0 0-32c0-12.9 7.8-24.6 19.8-29.6s25.7-2.2 34.9 6.9l64 64c6 6 9.4 14.1 9.4 22.6s-3.4 16.6-9.4 22.6l-64 64z"/></svg></div>
       <div class="tbtn mode" id="t-repeat" title="Repeat"><svg viewBox="0 0 16 16"><path d="M4 4h7.2L9.8 2.6 11 1.4 14.4 4.8 11 8.2 9.8 7l1.4-1.4H4c-1 0-1.8.8-1.8 1.8v.5H.6v-.5C.6 5.5 2.1 4 4 4zm8 8H4.8l1.4 1.4L5 14.6 1.6 11.2 5 7.8 6.2 9 4.8 10.4H12c1 0 1.8-.8 1.8-1.8v-.5h1.6v.5c0 1.9-1.5 3.4-3.4 3.4z"/></svg><span id="repeat-one" class="repeat-one hidden">1</span></div>
     </div>
     <div class="volume-control" title="Volume">
@@ -47,7 +47,7 @@
     <div class="lcd" id="lcd">
       <button class="visualizer-dot" id="visualizer-dot" title="Show visualizer" aria-label="Show visualizer"></button>
       <div class="lcd-stage">
-        <div class="lcd-copy">
+        <div class="lcd-copy" id="lcd-copy" role="button" tabindex="0" aria-label="Show current playback">
           <div class="lcd-main" id="lcd-main">iAmped</div>
           <div class="lcd-sub" id="lcd-sub">Plexamp metadata → iPod &amp; MP3 players</div>
           <div class="lcd-progrow hidden" id="lcd-progrow">
@@ -99,9 +99,17 @@
 
       <!-- PLEX SERVER / SETUP -->
       <div class="pane active" id="pane-plex">
-        <h2>Plex Media Server</h2>
-        <p class="lead">Plexamp is only a client — play counts, ratings and playlists live on your Plex server. The app and your music can be on different machines; audio is streamed and downloaded over the Plex API.</p>
-        <div class="oauth-box">
+        <h2 id="server-heading">Media Server</h2>
+        <p class="lead" id="server-lead">Choose a self-hosted media server. iAmped reads its music metadata and downloads the original audio directly to your device.</p>
+        <div class="row">
+          <div class="field"><label>Saved source</label>
+            <select id="source-select"><option value="">Add a server…</option></select></div>
+          <div class="field"><label>Server type</label>
+            <select id="source-kind"><option value="plex">Plex</option><option value="jellyfin">Jellyfin</option><option value="kodi">Kodi</option></select></div>
+          <div class="field"><label>Source name <span class="muted">(optional)</span></label>
+            <input type="text" id="source-name" placeholder="Home music server"></div>
+        </div>
+        <div class="oauth-box" id="plex-oauth-box">
           <button class="aqua" id="btn-plex-oauth">Sign in with Plex</button>
           <span class="muted">Recommended — iAmped will find your available servers.</span>
           <div class="status" id="oauth-status"></div>
@@ -114,14 +122,20 @@
             </div>
           </div>
         </div>
-        <div class="manual-label">Or connect manually (optional)</div>
+        <div class="manual-label" id="manual-label">Or connect manually</div>
         <div class="row">
           <div class="field"><label>Server URL</label>
             <input type="text" id="baseurl" placeholder="http://192.168.1.10:32400"></div>
-          <div class="field"><label>Plex token</label>
+          <div class="field" id="token-field"><label id="token-label">Plex token</label>
             <input type="password" id="token" placeholder="X-Plex-Token"></div>
         </div>
-        <button id="btn-connect">Connect manually</button>
+        <div class="row hidden" id="login-row">
+          <div class="field"><label id="username-label">Username</label>
+            <input type="text" id="source-username" autocomplete="username"></div>
+          <div class="field"><label>Password</label>
+            <input type="password" id="source-password" autocomplete="current-password"></div>
+        </div>
+        <button id="btn-connect">Connect</button>
         <div class="status" id="connect-status"></div>
         <div class="field hidden" id="section-wrap" style="margin-top:14px;">
           <label>Music library section</label><select id="section"></select>
@@ -143,7 +157,6 @@
             <button data-vm="grid" title="Grid view" aria-label="Grid view"><svg viewBox="0 0 16 16" width="13" height="13"><rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/></svg></button>
           </div>
           <div class="browse-actions">
-            <button class="aqua" id="btn-play-sel" title="Play selection"><svg class="btn-ico" viewBox="0 0 16 16" width="11" height="11"><path d="M3 2l11 6L3 14z"/></svg> Play</button>
             <button id="btn-sonic" title="Create a sonically-similar playlist from the selected track"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M8 1l1.6 4.9L14.5 8l-4.9 1.6L8 14.5 6.4 9.6 1.5 8l4.9-1.6z"/></svg> Sonic playlist</button>
             <button id="btn-add" title="Add selection to a playlist"><svg class="btn-ico" viewBox="0 0 16 16" width="12" height="12"><path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z"/></svg> Add to…</button>
             <span class="menu hidden" id="add-menu"></span>
@@ -172,7 +185,6 @@
                 <button class="aqua" id="rp-build">Build</button>
               </div>
             </div>
-            <button id="btn-del-pl" class="hidden">Delete playlist</button>
           </div>
           <div class="browse-actions device-actions hidden" id="device-music-actions">
             <span id="dm-summary" class="sub"></span>
@@ -187,9 +199,6 @@
             <div class="hero-name" id="hero-name"></div>
             <div class="hero-artist" id="hero-artist"></div>
             <div class="hero-meta" id="hero-meta"></div>
-            <div class="hero-actions">
-              <button class="aqua" id="hero-play"><svg class="btn-ico" viewBox="0 0 16 16" width="11" height="11"><path d="M3 2l11 6L3 14z"/></svg> Play album</button>
-            </div>
           </div>
         </div>
         <div class="songlist">
@@ -274,24 +283,6 @@
           Writes a non-hashed <b>iTunesDB</b> — works on iPod 1G–5.5G, mini, and nano 1G–3G.
           <b>iPod Classic 6G/7G and nano 6G+ are not supported</b> (Apple’s hashAB checksum); use USB mode + Rockbox for those. Any existing iTunesDB is backed up first.
         </div>
-        <div class="row">
-          <div class="field"><label>Device path</label>
-            <input type="text" id="device-path" placeholder="/Volumes/IPOD"></div>
-          <div class="field hidden" id="devname-wrap"><label>iPod name</label>
-            <input type="text" id="device-name" value="iPod"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Fill remaining space by</label>
-            <select id="strategy">
-              <option value="most_played">Most played</option>
-              <option value="top_rated">Highest rated</option>
-              <option value="recently_played">Recently played</option>
-              <option value="random">Random</option>
-              <option value="title">Alphabetical</option>
-            </select></div>
-          <div class="field"><label>Leave free (headroom MB)</label>
-            <input type="number" id="reserve" value="200" min="0" step="50"></div>
-        </div>
         <label class="check"><input type="checkbox" id="transcode" checked>
           Transcode lossless and higher-bitrate files when needed <span class="muted" id="ffmpeg-note"></span></label>
         <div class="bitrate-control" id="bitrate-control">
@@ -348,6 +339,14 @@
         <details class="advanced-settings">
           <summary>Advanced settings</summary>
           <div class="advanced-body">
+            <div class="row advanced-device-fields">
+              <div class="field"><label>Device path</label>
+                <input type="text" id="device-path" placeholder="/Volumes/IPOD"></div>
+              <div class="field hidden" id="devname-wrap"><label>iPod name</label>
+                <input type="text" id="device-name" value="iPod"></div>
+              <div class="field"><label>Leave free (headroom MB)</label>
+                <input type="number" id="reserve" value="20" min="0" step="10"></div>
+            </div>
             <label class="check"><input type="checkbox" id="sync-artwork" checked>
               Sync album artwork</label>
             <label class="check"><input type="checkbox" id="mirror" checked>

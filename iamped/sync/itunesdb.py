@@ -379,7 +379,8 @@ def read_manifest(device_path: str) -> dict | None:
 class ITunesDBBackend:
     label = "Classic iPod (iTunesDB)"
 
-    def __init__(self, device_path: str, device_name: str = "iPod"):
+    def __init__(self, device_path: str, device_name: str = "iPod",
+                 ipod_generation: str | None = None):
         self.root = device_path
         self.device_name = device_name
         self.ctrl = os.path.join(device_path, "iPod_Control")
@@ -400,7 +401,7 @@ class ITunesDBBackend:
         except OSError:
             pass
         usb = usbdetect.match(mountpoint=device_path) or {}
-        self._generation = usb.get("generation") or ""
+        self._generation = ipod_generation or usb.get("generation") or ""
         self._hash58 = bool(
             self._existing_db and len(self._existing_db) >= 0x6C
             and _u32(self._existing_db, 4) >= 0xF4
@@ -485,6 +486,7 @@ class ITunesDBBackend:
                 "dbid": r.get("dbid") or r["track_id"],
                 "_artwork_id": r.get("mhii_link") or 0,
                 "_artwork_size": r.get("artwork_size") or 0,
+                "_artwork_present": bool(r.get("artwork_count") or 0),
                 "_mhit_header": r.get("raw_header"),
             }
             if desired:
@@ -494,6 +496,9 @@ class ITunesDBBackend:
                 track.update({
                     "title": desired.get("title"), "artist": desired.get("artist"),
                     "album": desired.get("album"), "genre": desired.get("genre"),
+                    "album_artist": desired.get("album_artist"),
+                    "album_key": desired.get("album_key"),
+                    "album_thumb": desired.get("album_thumb"),
                     "duration_ms": desired.get("duration_ms") or track["duration_ms"],
                     "track_number": desired.get("track_number") or track["track_number"],
                     "year": desired.get("year") or track["year"],

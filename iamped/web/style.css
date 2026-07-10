@@ -72,6 +72,7 @@ input, button, select { font-family: inherit; }
 .app-menu-sep { height: 1px; margin: 4px 0; background: #dedede; }
 .menu-check { width: 12px; flex: none; color: inherit; text-align: center; }
 .menu-check.on::before { content: "✓"; }
+html.native-macos .app-menubar { display: none; }
 
 /* ---- toolbar with LCD ---- */
 .toolbar {
@@ -98,6 +99,8 @@ input, button, select { font-family: inherit; }
 /* Shuffle/Repeat are secondary toggles: smaller, but still perfectly round. */
 .tbtn.mode { width: 38px; height: 38px; }
 .tbtn.mode svg { width: 16px; height: 16px; }
+#t-shuffle { color: #000; }
+#t-shuffle svg { fill: currentColor; stroke: none; opacity: 1; }
 .volume-control { display: flex; align-items: center; gap: 7px; width: 170px; color: #3e3e3e; }
 .volume-control svg { width: 20px; height: 20px; flex: none; }
 .volume-control input { width: 132px; accent-color: #777; }
@@ -130,6 +133,8 @@ input, button, select { font-family: inherit; }
   min-width: 0; overflow: hidden; padding: 0 4px;
   display: flex; flex-direction: column; justify-content: center;
 }
+.lcd-copy.activity { cursor: pointer; }
+.lcd-copy.activity:focus-visible { outline: 1px solid #5e7d45; outline-offset: 2px; }
 .lcd-main, .lcd-sub {
   display: block; min-width: 0; max-width: 100%;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
@@ -350,7 +355,7 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
 
 /* ---- bottom bar + capacity ---- */
 .bottombar {
-  height: 78px; flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 8px 18px;
+  height: 100px; flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 8px 18px;
   background:
     linear-gradient(rgba(0,0,0,.05), rgba(0,0,0,0) 30%, rgba(0,0,0,.14)),
     url("brushed-metal.svg");
@@ -358,24 +363,24 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
   box-shadow: inset 0 1px 0 rgba(255,255,255,.7);
 }
 .now-playing {
-  width: 300px; min-width: 230px; height: 42px; display: grid;
-  grid-template-columns: 38px minmax(0, 1fr); gap: 8px; align-items: center;
+  width: 338px; min-width: 268px; height: 76px; display: grid;
+  grid-template-columns: 76px minmax(0, 1fr); gap: 10px; align-items: center;
   padding-right: 8px; border-right: 1px solid rgba(0,0,0,.18); margin-top: 0;
 }
 .np-art {
-  width: 38px; height: 38px; border: 1px solid #8a8a8a; border-radius: 2px;
+  width: 76px; height: 76px; border: 1px solid #8a8a8a; border-radius: 3px;
   background: linear-gradient(135deg, #f7f7f7, #bfc5ce);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.65), 0 1px 1px rgba(0,0,0,.15);
   background-size: cover; background-position: center;
 }
 .np-art.empty::before {
-  content: ""; display: block; width: 16px; height: 16px; margin: 10px auto 0;
-  border-radius: 50%; border: 2px solid rgba(75,82,92,.45);
+  content: ""; display: block; width: 28px; height: 28px; margin: 22px auto 0;
+  border-radius: 50%; border: 3px solid rgba(75,82,92,.45);
 }
 .np-copy { min-width: 0; }
 .np-title, .np-sub { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .np-title { font-weight: bold; color: #242424; font-size: 11px; }
-.np-sub { color: #555; font-size: 10px; margin-top: 1px; }
+.np-sub { color: #555; font-size: 11px; margin-top: 2px; }
 .np-rating { display: flex; gap: 1px; height: 15px; align-items: center; }
 .np-star {
   border: 0; background: transparent; padding: 0 1px; width: 14px; height: 14px;
@@ -385,22 +390,22 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
 .np-star:hover { color: #d18b13; }
 .round-btn {
   width: 26px; height: 26px; border-radius: 5px; padding: 0; font-size: 16px; color: #555;
-  background: linear-gradient(#fcfcfc, #d8d8d8); border: 1px solid #8f8f8f; margin-top: 13px;
+  background: linear-gradient(#fcfcfc, #d8d8d8); border: 1px solid #8f8f8f; margin-top: 25px;
 }
-.capacity { flex: 1; height: 18px; border-radius: 8px; overflow: hidden; display: flex; margin-top: 10px;
+.capacity { flex: 1; height: 18px; border-radius: 8px; overflow: hidden; display: flex; margin-top: 25px;
   background: #cfcfcf; border: 1px solid #8d8d8d; box-shadow: inset 0 1px 2px rgba(0,0,0,.3); }
 .capacity i { display: block; height: 100%; }
 .seg-music { background: linear-gradient(#ffd980, #f4a72b); }
 .seg-reserve { background: linear-gradient(#cfcfcf, #a9a9a9); }
 .seg-free { background: linear-gradient(#fdfdfd, #e6e6e6); }
-.cap-legend { display: flex; gap: 12px; font-size: 11px; color: #444; align-items: center; margin-top: 8px; }
+.cap-legend { display: flex; gap: 12px; font-size: 11px; color: #444; align-items: center; margin-top: 23px; }
 .cap-legend span { display: flex; align-items: center; gap: 5px; }
 .cap-legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; border: 1px solid rgba(0,0,0,.25); }
-.sync-actions { display: flex; gap: 8px; margin-top: 5px; }
+.sync-actions { display: flex; gap: 8px; margin-top: 20px; }
 .sync-actions button { min-width: 120px; padding: 8px 20px; }
 
 /* iTunes-style sync status bar (lives in the bottom bar while a sync runs) */
-.sync-progress { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sync-progress { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; margin-top: 20px; }
 .sync-progress .sp-text { display: flex; justify-content: space-between; gap: 10px;
   font-size: 11px; color: #444; }
 .sync-progress .sp-text span:first-child { overflow: hidden; white-space: nowrap;
@@ -701,6 +706,11 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
   padding: 0 9px 9px; border-top: 1px solid #d9dee5;
   background: #fff;
 }
+.advanced-device-fields {
+  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 8px; max-width: none; margin-top: 9px;
+}
+.advanced-device-fields .field { margin-bottom: 0; }
 .device-inspector .checklist { max-height: 110px; }
 .device-inspector #preview-wrap { display: none !important; }
 .device-inspector #plan-summary { display: block; margin: 7px 0 0 !important; font-size: 11px; }

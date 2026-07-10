@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
 from iamped import server  # noqa: F401  (app import side-effects)
 from iamped.api import syncing as server_sync
-from iamped.sync import device_state, hash58
+from iamped.sync import device_state, hash58, ipod_artwork
 from iamped.sync.itunesdb import ITunesDBBackend, read_manifest, read_tracks_full
 from iamped.sync.massstorage import MassStorageBackend
 
@@ -269,6 +271,68 @@ class DeviceTransactionTest(unittest.TestCase):
             self.assertEqual(manifest["device_name"], "Test iPod")
             self.assertEqual(manifest["tracks"][0]["rating_key"], "42")
             self.assertEqual(manifest["tracks"][0]["path"], record["path"])
+
+    def test_sync_backfills_missing_ipod_artwork_without_recopied_audio(self):
+        class FakeLibrary:
+            def all_playlists(self):
+                return []
+
+            def ordered_tracks(self, _strategy):
+                return [{
+                    **track("42"),
+                    "album_key": "album-42",
+                    "album_thumb": "/library/metadata/42/thumb",
+                    "file_size": 64,
+                    "part_key": "/library/parts/42",
+                }]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.m4a"
+            source.write_bytes(b"native-audio")
+            cover = root / "cover.jpg"
+            Image.new("RGB", (320, 320), (200, 40, 120)).save(cover, "JPEG")
+
+            backend = ITunesDBBackend(
+                tmp, "Test iPod", ipod_generation="iPod nano (1st generation)")
+            backend.prepare()
+            record = backend.add_track(track("42"), str(source), ".m4a")
+            backend.finalize()
+            copied = root / record["path"]
+            before = copied.stat().st_mtime_ns
+
+            params = {
+                "device_path": tmp,
+                "device_type": "ipod",
+                "device_name": "Test iPod",
+                "ipod_generation": "iPod nano (1st generation)",
+                "mirror": True,
+                "reserve_mb": 0,
+                "fill_strategy": "most_played",
+                "playlist_ids": [],
+                "transcode_lossless": False,
+                "sync_artwork": True,
+                "max_tracks": 1,
+            }
+            job = {}
+            with patch.object(server_sync, "_lib", return_value=FakeLibrary()), \
+                    patch.object(server_sync, "get_server", return_value=object()), \
+                    patch.object(server_sync, "free_bytes", return_value=1000), \
+                    patch.object(server_sync.artwork, "materialize",
+                                 return_value=str(cover)):
+                diff = server_sync._device_plan(params)
+                self.assertEqual(diff["artwork_update_keys"], {"42"})
+                self.assertEqual(diff["add_tracks"], [])
+                server_sync._sync_job(job, params)
+
+            rows = read_tracks_full(
+                (root / "iPod_Control/iTunes/iTunesDB").read_bytes())
+            self.assertEqual(rows[0]["artwork_count"], 1)
+            self.assertEqual(copied.stat().st_mtime_ns, before)
+            self.assertEqual(job["result"]["artwork_updated"], 1)
+            self.assertEqual(
+                ipod_artwork.validate(tmp),
+                {"datasets": 3, "images": 1, "thumbnails": 2})
 
     def test_native_resume_does_not_duplicate_track_after_database_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

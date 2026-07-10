@@ -1,12 +1,13 @@
 """Playback control, artwork proxy, and audio streaming routes."""
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 
 from flask import Blueprint, Response, jsonify, request, send_file
 
-from .. import playback, plex_client
+from .. import artwork, config, playback, plex_client, providers
 from ..library import Library
 from ..server import _lib, get_server
 from ..sync.base import have_ffmpeg
@@ -15,6 +16,10 @@ from ..sync.base import have_ffmpeg
 from . import syncing
 
 bp = Blueprint("playback", __name__)
+
+
+def _connection():
+    return providers.normalize(get_server())
 
 
 @bp.get("/api/playback/status")
@@ -33,8 +38,8 @@ def api_playback_play():
     if not tr:
         return jsonify({"error": "unknown track"}), 404
     try:
-        server = get_server()
-        url = plex_client.stream_url(server, tr["part_key"])
+        server = _connection()
+        url = server.provider.stream_url(server, tr)
         start = max(0.0, float(data.get("start") or 0))
         return jsonify(playback.PLAYER.play(url, start))
     except Exception as exc:  # noqa: BLE001
@@ -52,8 +57,8 @@ def api_playback_next():
     if not tr:
         return jsonify({"error": "unknown track"}), 404
     try:
-        server = get_server()
-        url = plex_client.stream_url(server, tr["part_key"])
+        server = _connection()
+        url = server.provider.stream_url(server, tr)
         return jsonify(playback.PLAYER.set_next(url))
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc), **playback.PLAYER.status()}), 503
@@ -104,19 +109,24 @@ def api_artwork():
     if not key:
         return jsonify({"error": "key is required"}), 400
     try:
-        server = get_server()
+        server = _connection()
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400
-    url = server.url(key, includeToken=True)
-    r = server._session.get(url, timeout=15)
-    resp = Response(r.content, status=r.status_code,
-                    content_type=r.headers.get("Content-Type", "image/jpeg"))
-    if r.status_code == 200:
+    proxy_track = {"source_id": server.source_id, "album_key": key}
+    path = artwork.cache_path(proxy_track)
+    try:
+        if not (os.path.exists(path) and os.path.getsize(path) > 0):
+            server.provider.download_image(server, key, path)
+        with open(path, "rb") as image:
+            data = image.read()
+        resp = Response(data, status=200, content_type="image/jpeg")
         # Plex image keys are versioned (…/thumb/<epoch>), so the bytes for a
         # given key never change — let the webview cache them instead of
         # re-fetching every tile on each library scroll.
         resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
-    return resp
+        return resp
+    except Exception as exc:  # noqa: BLE001 - artwork is non-essential
+        return jsonify({"error": str(exc)}), 404
 
 
 _NATIVE_STREAM = {"mp3", "m4a", "aac", "mp4", "ogg", "oga", "opus", "wav", "wma"}
@@ -176,7 +186,7 @@ def api_stream(rk):
     if not tr:
         return jsonify({"error": "unknown track"}), 404
     try:
-        server = get_server()
+        server = _connection()
     except Exception as exc:  # noqa: BLE001
         # Plex is unreachable/unconfigured — fall back to the sync cache so the
         # player still works offline.
@@ -184,7 +194,7 @@ def api_stream(rk):
         if offline is not None:
             return offline
         return jsonify({"error": str(exc)}), 400
-    url = plex_client.stream_url(server, tr["part_key"])
+    url = server.provider.stream_url(server, tr)
     native = (tr.get("container") or "").lower() in _NATIVE_STREAM
     try:
         start = max(0.0, float(request.args.get("start", "0") or 0))
@@ -215,7 +225,7 @@ def api_stream(rk):
             return _audio_stream_headers(resp)
         req_range = request.headers.get("Range")
         headers = {"Range": req_range} if req_range else {}
-        up = server._session.get(url, headers=headers, stream=True, timeout=(10, None))
+        up = server.provider.stream_response(server, tr, headers=headers, stream=True)
         resp = Response(up.iter_content(65536), status=up.status_code)
         for h in ("Content-Type", "Content-Length", "Accept-Ranges", "Content-Range"):
             if h in up.headers:

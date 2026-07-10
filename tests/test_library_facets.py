@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
 
 from iamped.library import Library
 from iamped.plex_client import TrackMeta
@@ -69,6 +70,32 @@ class LibraryFacetTests(unittest.TestCase):
             self.assertEqual([t["title"] for t in artist_b["tracks"]], ["Delta", "Gamma"])
             album_a_by_b = lib.browse_tracks(album="Album A", album_artist="Artist B")
             self.assertEqual([t["title"] for t in album_a_by_b["tracks"]], ["Delta"])
+
+    def test_upsert_recovers_from_malformed_fts_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = f"{td}/library.db"
+            lib = Library(db_path)
+            lib.upsert_tracks([
+                track("1", "Alpha", "Artist A", "Album A", "Rock"),
+            ])
+
+            # Match the production failure mode where the table is sound enough
+            # to pass general integrity checks, but FTS trigger writes fail with
+            # "database disk image is malformed" until the FTS index is rebuilt.
+            con = sqlite3.connect(db_path)
+            con.execute(
+                "UPDATE tracks_fts_data SET block = zeroblob(length(block)) "
+                "WHERE id = (SELECT id FROM tracks_fts_data LIMIT 1)"
+            )
+            con.commit()
+            con.close()
+
+            lib.upsert_tracks([
+                track("1", "Alpha Rebuilt", "Artist A", "Album A", "Rock"),
+            ])
+
+            row = lib.get_tracks(["1"])["1"]
+            self.assertEqual(row["title"], "Alpha Rebuilt")
 
 
 if __name__ == "__main__":
