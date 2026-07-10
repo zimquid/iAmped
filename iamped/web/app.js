@@ -364,7 +364,12 @@ async function loadConfig() {
   updateSdMenuState();
   STATE.autosyncEnabled = cfg.autosync_enabled !== false;
   updateAutosyncMenuState();
-  if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
+  if ($("ingest-dir")) {
+    $("ingest-dir").value = cfg.ingest_dir || "";
+    INGEST_SECTION = cfg.ingest_section || "";
+    loadIngestFolders();               // populate the Plex-folder dropdown
+    if (cfg.ingest_dir) validateIngest();  // show current folder's status
+  }
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   if ($("ipod-format")) $("ipod-format").value = cfg.ipod_format || "aac";
   applyAacQualityNote(cfg);
@@ -1419,17 +1424,82 @@ async function confirmIngest() {
     });
   } catch (e) { s.className = "status err"; s.textContent = e.message; $("ingest-confirm").disabled = false; }
 }
+// Section tied to the folder the user picked from the dropdown; empty for a
+// hand-typed custom path (the backend then falls back to the music section).
+let INGEST_SECTION = "";
+
+function paintIngestHint(status) {
+  const hint = $("ingest-dir-hint");
+  if (!hint) return null;
+  hint.textContent = status.message || "";
+  hint.style.color = status.ok ? "#1a7f37"
+    : status.writable ? "#9a6700"   // reachable but Plex may not watch it
+    : status.path ? "#b42318" : "";
+  return status;
+}
+
+// Ask the backend whether the current path is reachable/writable here and
+// inside a folder Plex watches. Debounced so typing doesn't spam the server.
+let _ingestValidateTimer = null;
+function validateIngestDebounced() {
+  clearTimeout(_ingestValidateTimer);
+  _ingestValidateTimer = setTimeout(validateIngest, 350);
+}
+async function validateIngest() {
+  const dir = $("ingest-dir").value.trim();
+  if (!dir) return paintIngestHint({ path: "", ok: false, writable: false, message: "" });
+  try {
+    return paintIngestHint(await api("/api/ingest/validate", "POST", { ingest_dir: dir }));
+  } catch (e) { return null; }
+}
+
+// Populate the dropdown from the folders Plex actually watches, flagging any
+// this machine can't reach or write to (usually a mount-path mismatch).
+async function loadIngestFolders() {
+  const sel = $("ingest-folder-select");
+  if (!sel) return;
+  let r;
+  try { r = await api("/api/plex/music/locations"); }
+  catch (e) { sel.style.display = "none"; return; }
+  if (!r.supported) { sel.style.display = "none"; return; }  // e.g. active source isn't Plex
+  sel.style.display = "";
+  const current = ($("ingest-dir").value || r.ingest_dir || "").trim();
+  const opts = ['<option value="">— pick a Plex library folder —</option>'];
+  for (const s of r.sections || []) {
+    for (const f of s.folders || []) {
+      const warn = f.writable ? "" : (f.exists ? "  (not writable here)" : "  (not reachable here)");
+      opts.push(`<option value="${esc(f.path)}" data-section="${esc(s.title)}"`
+        + (f.path === current ? " selected" : "") + ">"
+        + `${esc(s.title)} — ${esc(f.path)}${esc(warn)}</option>`);
+    }
+  }
+  opts.push('<option value="__custom__">Custom path…</option>');
+  sel.innerHTML = opts.join("");
+}
+
+function onIngestFolderPick() {
+  const sel = $("ingest-folder-select");
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || opt.value === "__custom__") { INGEST_SECTION = ""; $("ingest-dir").focus(); return; }
+  if (!opt.value) { INGEST_SECTION = ""; return; }
+  $("ingest-dir").value = opt.value;
+  INGEST_SECTION = opt.dataset.section || "";
+  validateIngest();
+}
+
 async function saveIngestDir() {
   const dir = $("ingest-dir").value.trim();
   try {
-    await api("/api/config", "POST", { ingest_dir: dir });
+    const status = await validateIngest();  // also repaints the hint
+    // Derive the section to rescan: the dropdown pick, or whatever Plex library
+    // the validator found this path inside; else leave blank (backend falls
+    // back to the configured music section).
+    const section = INGEST_SECTION || (status && status.watched_by) || "";
+    await api("/api/config", "POST", { ingest_dir: dir, ingest_section: section });
     const hint = $("ingest-dir-hint");
-    hint.textContent = "Saved.";
-    try {
-      const r = await api("/api/plex/music/locations");
-      const locs = (r.sections || []).flatMap((s) => s.locations);
-      if (locs.length) hint.textContent = "Saved. Plex watches: " + locs.join(", ");
-    } catch (e) {}
+    if (status && status.ok) hint.textContent = "Saved — " + status.message;
+    else if (status) hint.textContent = "Saved, but heads up: " + status.message;
+    else hint.textContent = "Saved.";
   } catch (e) { alert(e.message); }
 }
 
@@ -2891,6 +2961,8 @@ $("btn-reclaim").onclick = reclaimOther;
 $("btn-dm-select-foreign").onclick = selectForeignDeviceTracks;
 $("btn-dm-ingest").onclick = ingestSelectedDeviceMusic;
 $("btn-save-ingest").onclick = saveIngestDir;
+if ($("ingest-folder-select")) $("ingest-folder-select").onchange = onIngestFolderPick;
+if ($("ingest-dir")) $("ingest-dir").oninput = validateIngestDebounced;
 $("ingest-cancel").onclick = closeIngest;
 $("ingest-confirm").onclick = confirmIngest;
 $("src-music").onclick = openLibrary;

@@ -390,8 +390,15 @@
               </div>
               <div>
                 <b>Ingest folder</b>
-                <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
-                <button id="btn-save-ingest">Save</button>
+                <div style="margin-top:4px;">
+                  <select id="ingest-folder-select" style="min-width:320px;" title="Folders your Plex server actually watches">
+                    <option value="">Loading Plex library folders…</option>
+                  </select>
+                </div>
+                <div style="margin-top:4px;">
+                  <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
+                  <button id="btn-save-ingest">Save</button>
+                </div>
                 <div class="muted" id="ingest-dir-hint" style="font-size:11px; margin-top:4px;"></div>
               </div>
             </div>

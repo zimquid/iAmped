@@ -27,6 +27,68 @@ from .library import Library
 MATCH_THRESHOLD = 0.88        # same bar the device-matches UI uses for "confident"
 
 
+def _within_or_equal(child: str, parent: str) -> bool:
+    """True if ``child`` is ``parent`` or a folder beneath it.
+
+    Best-effort across hosts: the server may report a path the way *it* sees it,
+    which can differ from how the iAmped machine mounts the same share, so this
+    is only a positive signal — a False means "couldn't confirm", not "wrong".
+    """
+    if not child or not parent:
+        return False
+    c = os.path.normcase(os.path.normpath(child))
+    p = os.path.normcase(os.path.normpath(parent))
+    return c == p or c.startswith(p + os.sep)
+
+
+def folder_status(ingest_dir: str, sections: list[dict]) -> dict:
+    """Assess a candidate ingest folder for reverse-feed into Plex.
+
+    ``sections`` is the provider's reported music libraries, each
+    ``{"title": str, "locations": [str, ...]}``. Returns whether the folder is
+    reachable/writable *from this machine* and whether it sits inside a folder
+    Plex actually watches — the two independent conditions ingest-back needs.
+    """
+    status = {
+        "path": ingest_dir or "",
+        "exists": False,
+        "writable": False,
+        "plex_watched": False,
+        "watched_by": None,
+        "ok": False,
+        "message": "",
+    }
+    if not ingest_dir:
+        status["message"] = "No ingest folder set yet."
+        return status
+
+    status["exists"] = os.path.isdir(ingest_dir)
+    status["writable"] = status["exists"] and os.access(ingest_dir, os.W_OK)
+
+    for section in sections or []:
+        for loc in section.get("locations") or []:
+            if _within_or_equal(ingest_dir, loc):
+                status["plex_watched"] = True
+                status["watched_by"] = section.get("title")
+                break
+        if status["plex_watched"]:
+            break
+
+    status["ok"] = status["writable"] and status["plex_watched"]
+    if not status["exists"]:
+        status["message"] = "Folder does not exist on this machine yet."
+    elif not status["writable"]:
+        status["message"] = "Folder exists but is not writable from here."
+    elif not status["plex_watched"]:
+        status["message"] = (
+            "Writable, but it doesn't look like a folder Plex watches — files "
+            "copied here may never be indexed. Double-check the path, or pick a "
+            "library folder from the list.")
+    else:
+        status["message"] = f"Ready — inside the “{status['watched_by']}” library."
+    return status
+
+
 def _enrich(lib: Library, track: dict) -> dict:
     """Fill in artist/title/album from the file's own tags where the device DB
     is thin (mass-storage rows only know the filename), so we can place the file
