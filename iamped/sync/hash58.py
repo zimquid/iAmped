@@ -1,6 +1,11 @@
 """Device-bound iTunesDB authentication used by nano 3G/4G and iPod Classic.
 
-This is a Python port of libgpod's BSD-licensed ``itdb_hash58.c`` algorithm.
+This is a Python port of libgpod's ``itdb_hash58.c`` algorithm. libgpod is
+licensed **LGPL-2.1-or-later**; a port is a derivative work, so this module
+inherits those terms (attribution + share-alike on changes to this file +
+relinking) regardless of iAmped's overall license. Keep it as a self-contained,
+separately-attributed module. See ``tests/test_hash58_crosscheck.py`` for a
+differential check against an independent reference implementation.
 """
 from __future__ import annotations
 
