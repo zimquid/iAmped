@@ -97,6 +97,27 @@ class LibraryFacetTests(unittest.TestCase):
             row = lib.get_tracks(["1"])["1"]
             self.assertEqual(row["title"], "Alpha Rebuilt")
 
+    def test_search_suggestions_group_cached_music_by_kind(self):
+        with tempfile.TemporaryDirectory() as td:
+            lib = Library(f"{td}/library.db")
+            lib.upsert_tracks([
+                track("1", "The Trooper", "Iron Maiden", "Piece of Mind", "Heavy Metal"),
+                track("2", "Iron Man", "Black Sabbath", "Paranoid", "Heavy Metal"),
+                # Same album title must remain distinguishable by album artist.
+                track("3", "Iron Sky", "Paolo Nutini", "Iron Live", "Soul"),
+                track("4", "Iron Lion", "Example", "Iron Live", "Pop"),
+            ])
+
+            results = lib.search_suggestions("iron")
+            self.assertEqual([row["title"] for row in results["tracks"]],
+                             ["Iron Lion", "Iron Man", "Iron Sky", "The Trooper"])
+            self.assertEqual(results["artists"], [{"name": "Iron Maiden", "count": 1,
+                                                     "album_thumb": None}])
+            self.assertEqual([(row["name"], row["artist"]) for row in results["albums"]],
+                             [("Iron Live", "Example"), ("Iron Live", "Paolo Nutini")])
+            self.assertEqual(lib.search_suggestions("heavy")["genres"],
+                             [{"name": "Heavy Metal", "count": 2}])
+
 
 if __name__ == "__main__":
     unittest.main()

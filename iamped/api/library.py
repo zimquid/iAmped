@@ -168,6 +168,15 @@ def api_library_facets():
     return jsonify(_lib().facets(_source_id()))
 
 
+@bp.get("/api/library/search")
+def api_library_search():
+    # Kept distinct from /api/tracks: this endpoint is intentionally small and
+    # grouped for the global typeahead, while track browsing remains paged.
+    return jsonify(_lib().search_suggestions(
+        request.args.get("q", ""), _source_id(),
+        limit=int(request.args.get("limit", 6))))
+
+
 @bp.get("/api/tracks")
 def api_tracks():
     a = request.args
