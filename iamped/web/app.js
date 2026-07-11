@@ -3195,8 +3195,13 @@ async function pollActiveJobs() {
     }
   } catch (_) {}
 }
-setInterval(pollActiveJobs, 5000);
-setInterval(pollDevices, 3500);   // auto-detect device connect/disconnect
+// Idle-quiet polling: a hidden window spawns no requests (each device poll
+// costs a subprocess scan server-side). Catch up immediately on return.
+setInterval(() => { if (!document.hidden) pollActiveJobs(); }, 5000);
+setInterval(() => { if (!document.hidden) pollDevices(); }, 3500);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { pollDevices(); pollActiveJobs(); }
+});
 
 // ---------------------------------------------------------------- wire up
 $("btn-connect").onclick = connect;
@@ -3323,14 +3328,18 @@ function handleAppMenuAction(action) {
     buildLibrary("full");
     return;
   }
-  else if (action === "toggle-visualizer") toggleVisualizer();
-  else if (action === "fullscreen-visualizer") openFullscreenVisualizer();
-  else if (action === "viz-bars") setAudioMotionStyle("bars", true);
-  else if (action === "viz-spectrum") setAudioMotionStyle("spectrum", true);
-  else if (action === "viz-led") setAudioMotionStyle("led", true);
+  else if (action === "toggle-visualizer") ensureVisualizerLibs().then((ok) => ok && toggleVisualizer());
+  else if (action === "fullscreen-visualizer") ensureVisualizerLibs().then((ok) => ok && openFullscreenVisualizer());
+  else if (action === "viz-bars") ensureVisualizerLibs().then((ok) => ok && setAudioMotionStyle("bars", true));
+  else if (action === "viz-spectrum") ensureVisualizerLibs().then((ok) => ok && setAudioMotionStyle("spectrum", true));
+  else if (action === "viz-led") ensureVisualizerLibs().then((ok) => ok && setAudioMotionStyle("led", true));
   else if (action === "viz-butterchurn") {
-    STATE.visualizerFullscreenEngine = "butterchurn";
-    openFullscreenVisualizer();
+    if (!hasWebGL()) return;             // 2008-class GPUs: entry stays inert
+    ensureVisualizerLibs().then((ok) => {
+      if (!ok) return;
+      STATE.visualizerFullscreenEngine = "butterchurn";
+      openFullscreenVisualizer();
+    });
   } else if (action === "inspector" && STATE.currentDevice) openDeviceInspector();
   updateVisualizerMenuState();
 }
@@ -3351,7 +3360,50 @@ document.querySelectorAll(".app-menu-row").forEach((row) => {
     handleAppMenuAction(action);
   };
 });
-$("visualizer-dot").onclick = (e) => { e.stopPropagation(); toggleVisualizer(); };
+$("visualizer-dot").onclick = (e) => { e.stopPropagation(); ensureVisualizerLibs().then((ok) => ok && toggleVisualizer()); };
+
+// ---- lazy visualizer libraries -------------------------------------------
+// ~375KB of WebGL JS (audioMotion + Butterchurn + presets) used to be parsed
+// on every launch. Now they load on first visualizer use; Butterchurn is
+// skipped entirely on machines without WebGL and its menu rows are greyed.
+let _vizLibs = null;
+let _hasWebGL = null;
+function hasWebGL() {
+  if (_hasWebGL === null) {
+    try {
+      const canvas = document.createElement("canvas");
+      _hasWebGL = !!(canvas.getContext("webgl") || canvas.getContext("experimental-webgl"));
+    } catch (e) { _hasWebGL = false; }
+  }
+  return _hasWebGL;
+}
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error(`failed: ${src}`));
+    document.head.appendChild(s);
+  });
+}
+function ensureVisualizerLibs() {
+  if (window.AudioMotionAnalyzer && (window.butterchurn || !hasWebGL())) return Promise.resolve(true);
+  if (_vizLibs) return _vizLibs;
+  lcd("iAmped", "Loading visualizer…");
+  _vizLibs = _loadScript("vendor/audiomotion-analyzer.js")
+    .then(() => hasWebGL()
+      ? _loadScript("vendor/butterchurn.min.js").then(() => _loadScript("vendor/butterchurnPresetsMinimal.min.js"))
+      : null)
+    .then(() => true)
+    .catch((e) => { _vizLibs = null; lcd("iAmped", "Visualizer failed to load"); return false; });
+  return _vizLibs;
+}
+// Grey out the Butterchurn menu entry when the GPU can't run it, and make
+// sure the fullscreen engine never defaults to a renderer we can't load.
+if (!hasWebGL()) {
+  const row = document.querySelector('[data-action="viz-butterchurn"]');
+  if (row) { row.classList.add("disabled"); row.title = "Requires WebGL"; }
+  if (STATE.visualizerFullscreenEngine === "butterchurn")
+    STATE.visualizerFullscreenEngine = "bars";
+}
 $("btn-exit-visualizer").onclick = closeFullscreenVisualizer;
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".app-menubar")) closeAppMenus();

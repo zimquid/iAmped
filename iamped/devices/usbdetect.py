@@ -142,17 +142,33 @@ def _windows_raw() -> list[dict]:
     return res
 
 
+# One UI device-poll can trigger several USB enumerations (volume matching,
+# iPod model lookup), each spawning ioreg/PowerShell. A short TTL means one
+# subprocess scan per poll cycle at most; plug/unplug is still seen within a
+# poll interval because the TTL is shorter than the UI's 3.5s cadence.
+_SCAN_TTL_S = 3.0
+_scan_cache: tuple[float, list[dict]] | None = None
+
+
 def _enumerate() -> list[dict]:
+    global _scan_cache
+    import time as _time
+    now = _time.monotonic()
+    if _scan_cache and now - _scan_cache[0] < _SCAN_TTL_S:
+        return _scan_cache[1]
     try:
         if _SYSTEM == "Darwin":
-            return _macos_raw()
-        if _SYSTEM == "Linux":
-            return _linux_raw()
-        if _SYSTEM == "Windows":
-            return _windows_raw()
+            found = _macos_raw()
+        elif _SYSTEM == "Linux":
+            found = _linux_raw()
+        elif _SYSTEM == "Windows":
+            found = _windows_raw()
+        else:
+            found = []
     except Exception:  # noqa: BLE001 - detection must never break enumeration
-        return []
-    return []
+        found = []
+    _scan_cache = (now, found)
+    return found
 
 
 def ipod_models() -> list[dict]:

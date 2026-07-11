@@ -506,9 +506,8 @@
   </div>
 </div>
 <audio id="player"></audio>
-<script src="vendor/audiomotion-analyzer.js"></script>
-<script src="vendor/butterchurn.min.js"></script>
-<script src="vendor/butterchurnPresetsMinimal.min.js"></script>
+<!-- Visualizer libraries (~375KB of WebGL JS) are lazy-loaded by app.js on
+     first use — see ensureVisualizerLibs() — so startup never parses them. -->
 <script src="app.js"></script>
 </body>
 </html>

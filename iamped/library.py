@@ -157,6 +157,13 @@ END;
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # WAL is set persistently at init; these are per-connection tuning
+        # knobs. NORMAL is durable-enough under WAL (a crash can lose the
+        # last transaction, never corrupt), and matters on spinning disks.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-8000")      # 8 MB page cache
+        conn.execute("PRAGMA mmap_size=134217728")   # 128 MB, no-op if unsupported
+        conn.execute("PRAGMA temp_store=MEMORY")
         try:
             yield conn
             conn.commit()

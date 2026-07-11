@@ -79,7 +79,12 @@ def index():
 
 @app.route("/<path:fname>")
 def static_files(fname):
-    return send_from_directory(WEB_DIR, fname)
+    # Werkzeug already serves ETag/Last-Modified with Cache-Control: no-cache,
+    # so app files revalidate (304) on every load. The vendored visualizer
+    # libraries only change with a release, so let browsers keep them for a
+    # day without even revalidating — they are the heaviest assets we serve.
+    max_age = 86400 if fname.startswith("vendor/") else None
+    return send_from_directory(WEB_DIR, fname, max_age=max_age)
 
 
 @app.get("/api/config")
