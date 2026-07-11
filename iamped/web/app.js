@@ -144,6 +144,13 @@ function updateTrackRows(ratingKey, patch) {
   STATE.tracks.forEach((track) => {
     if (track.rating_key === ratingKey) Object.assign(track, patch);
   });
+  // Library views share row objects with the catalog, but device/playlist
+  // views hold their own copies — patch the catalog too so it stays current.
+  if (typeof CATALOG !== "undefined" && CATALOG.rows && CATALOG.rows !== STATE.tracks) {
+    CATALOG.rows.forEach((track) => {
+      if (track.rating_key === ratingKey) Object.assign(track, patch);
+    });
+  }
   document.querySelectorAll(`#browse-body .songrow[data-rk="${CSS.escape(ratingKey)}"]`).forEach((row) => {
     if (patch.plays != null) row.querySelector(".c-plays").textContent = patch.plays || 0;
     if (patch.rating != null) row.querySelector(".c-rating").innerHTML = ratingStarsHtml(ratingKey, patch.rating);
@@ -478,6 +485,7 @@ async function activateSource(sourceId, quiet = false) {
     const res = await api("/api/sources/active", "POST", { source_id: sourceId });
     if (!res.ok) throw new Error(res.error || "Could not activate the media source.");
     await showConnected(res);
+    if (STATE.activeSourceId !== sourceId) invalidateCatalog();  // catalog is per-source
     STATE.activeSourceId = sourceId;
   } catch (e) {
     if (!quiet) { const s = $("connect-status"); s.className = "status err"; s.textContent = e.message; }
@@ -585,6 +593,7 @@ async function buildLibrary(mode = "auto") {
           s.className = "status ok"; s.textContent = j.message;
         }
         finishActivity("iAmped", j.message); $("btn-build").disabled = false;
+        invalidateCatalog();             // library changed — reload on next view
         await refreshStats(); await loadSidebar(); openLibrary();
       },
       onError: (e) => { s.className = "status err"; s.textContent = e; finishActivity("iAmped", "Build failed"); $("btn-build").disabled = false; },
@@ -1161,7 +1170,7 @@ function openFacetTracks(kind, item) {
   $("browse-title").textContent = item.name;
   selectPane("pane-browse", facetSrc(kind));
   STATE.tracks = []; $("browse-body").innerHTML = "";
-  loadMore(true);
+  refreshLibraryView();
 }
 function openLibrary() {
   STATE.view = { type: "library", title: "Music" };
@@ -1169,7 +1178,7 @@ function openLibrary() {
   $("browse-title").textContent = "Music";
   selectPane("pane-browse", $("src-music"));
   STATE.tracks = []; $("browse-body").innerHTML = "";
-  loadMore(true);
+  refreshLibraryView();
 }
 async function loadMore(reset) {
   if (STATE.view?.type !== "library") return;
@@ -1224,9 +1233,102 @@ async function openPlaylist(el) {
   STATE.tracks = r.tracks; renderTracks();
 }
 
-function rowHtml(t, i) {
+// ---- client-held catalog (the iTunes-.itl model) -------------------------
+// The whole cached library is loaded once and every browse interaction —
+// search, sort, facet filter — is an in-memory operation on it. No request
+// per keystroke, no debounce, no request races. The paged /api/tracks path
+// is kept as a fallback if the one-shot load ever fails.
+const CATALOG = { rows: null, loading: null, fallback: false };
+
+async function loadCatalog(force = false) {
+  if (CATALOG.rows && !force) return CATALOG.rows;
+  if (CATALOG.loading) return CATALOG.loading;
+  CATALOG.loading = (async () => {
+    const r = await api("/api/catalog");
+    const rows = r.tracks || [];
+    for (const t of rows) {         // precompute keys once — iTunes-style
+      t._kt = (t.title || "").toLowerCase();
+      t._ka = (t.artist || "").toLowerCase();
+      t._kb = (t.album || "").toLowerCase();
+      t._kaa = (t.album_artist || "").toLowerCase();
+      t._kg = (t.genre || "").toLowerCase();
+      t._k = t._kt + "\n" + t._ka + "\n" + t._kb;
+    }
+    CATALOG.rows = rows;
+    CATALOG.fallback = false;
+    return rows;
+  })();
+  try { return await CATALOG.loading; }
+  finally { CATALOG.loading = null; }
+}
+function invalidateCatalog() { CATALOG.rows = null; }
+
+// Replicates BROWSE_ORDER in library.py so local results match the SQL path.
+const CMP = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const CATALOG_SORTS = {
+  artist: (a, b) => CMP(a._ka, b._ka) || CMP(a._kb, b._kb)
+    || (a.disc_number || 0) - (b.disc_number || 0)
+    || (a.track_number || 0) - (b.track_number || 0),
+  album: (a, b) => CMP(a._kb, b._kb)
+    || (a.disc_number || 0) - (b.disc_number || 0)
+    || (a.track_number || 0) - (b.track_number || 0),
+  title: (a, b) => CMP(a._kt, b._kt),
+  most_played: (a, b) => (b.plays || 0) - (a.plays || 0) || (b.rating || 0) - (a.rating || 0),
+  top_rated: (a, b) => (b.rating || 0) - (a.rating || 0) || (b.plays || 0) - (a.plays || 0),
+  recently_played: (a, b) => (b.last_viewed_at || 0) - (a.last_viewed_at || 0),
+  plays: (a, b) => (b.plays || 0) - (a.plays || 0),
+};
+
+function localBrowse(rows) {
+  const v = STATE.view || {};
+  const filters = [];
+  const FIELD_KEYS = { artist: "_ka", album: "_kb", genre: "_kg", album_artist: "_kaa" };
+  if (v.facetParam && v.facetValue && FIELD_KEYS[v.facetParam])
+    filters.push([FIELD_KEYS[v.facetParam], v.facetValue.toLowerCase()]);
+  for (const [key, value] of Object.entries(v.facetExtra || {}))
+    if (FIELD_KEYS[key]) filters.push([FIELD_KEYS[key], String(value).toLowerCase()]);
+  const terms = (STATE.search || "").toLowerCase().split(/\s+/).filter(Boolean);
+  let out = rows.filter((t) => {
+    for (const [key, want] of filters) if (t[key] !== want) return false;
+    for (const term of terms) if (!t._k.includes(term)) return false;
+    return true;
+  });
+  if (STATE.sort === "random") {           // Fisher–Yates on the filtered copy
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+  } else {
+    out.sort(CATALOG_SORTS[STATE.sort] || CATALOG_SORTS.artist);
+  }
+  return out;
+}
+
+// Renders the current library view from the in-memory catalog. Falls back to
+// the paged server path once (and remembers) if the catalog can't load.
+async function refreshLibraryView() {
+  if (STATE.view?.type !== "library") return;
+  if (CATALOG.fallback) { STATE.offset = 0; STATE.tracks = []; loadMore(true); return; }
+  let rows;
+  try { rows = await loadCatalog(); }
+  catch (e) {
+    CATALOG.fallback = true;
+    STATE.offset = 0; STATE.tracks = []; loadMore(true);
+    return;
+  }
+  if (STATE.view?.type !== "library") return;  // view changed while loading
+  STATE.tracks = localBrowse(rows);
+  STATE.total = STATE.tracks.length;
+  STATE.offset = STATE.tracks.length;          // neutralize the paged path
+  renderTracks();
+}
+
+function rowHtml(t, i, k) {
+  // i = index into STATE.tracks (identity for selection/playback);
+  // k = visual position in the current window order (striping only).
+  const draggable = STATE.view?.type !== "device" ? ' draggable="true"' : "";
   return `
-    <div class="songrow${STATE.selected.has(t.rating_key) ? " selected" : ""}${STATE.playing === i ? " playing" : ""}" data-idx="${i}" data-rk="${esc(t.rating_key)}">
+    <div class="songrow${(k ?? i) % 2 ? "" : " odd"}${STATE.selected.has(t.rating_key) ? " selected" : ""}${STATE.playing === i ? " playing" : ""}" data-idx="${i}" data-rk="${esc(t.rating_key)}"${draggable}>
       <div class="c-check"><input type="checkbox" tabindex="-1" ${STATE.selected.has(t.rating_key) ? "checked" : ""}></div>
       <div class="c-num">${i + 1}</div>
       <div class="c-play">${STATE.playing === i ? "►" : ""}</div>
@@ -1236,31 +1338,72 @@ function rowHtml(t, i) {
       <div class="c-time">${fmtDur(t.duration_ms)}</div>
     </div>`;
 }
-function bindRows(rows) {
-  rows.forEach((row) => {
+
+// ---- windowed (virtual) track list ---------------------------------------
+// Only the ~visible slice of STATE.tracks exists in the DOM, between two
+// spacer divs that preserve scroll geometry — the owner-data list pattern
+// native players always used. All row events are delegated to the container,
+// so there are no per-row handlers regardless of library size.
+const VLIST = {
+  rowH: 28, overscan: 12,
+  order: null,     // visual order: array of STATE.tracks indices, or null = identity
+  raf: 0,
+};
+
+function vlCount() { return VLIST.order ? VLIST.order.length : STATE.tracks.length; }
+
+function vlRenderWindow() {
+  const body = $("browse-body");
+  const rowsEl = document.getElementById("vl-rows");
+  if (!rowsEl) return;                       // another view owns browse-body
+  const n = vlCount();
+  const start = Math.max(0, Math.floor(body.scrollTop / VLIST.rowH) - VLIST.overscan);
+  const end = Math.min(n, Math.ceil((body.scrollTop + body.clientHeight) / VLIST.rowH) + VLIST.overscan);
+  document.getElementById("vl-top").style.height = `${start * VLIST.rowH}px`;
+  document.getElementById("vl-bottom").style.height = `${Math.max(0, n - end) * VLIST.rowH}px`;
+  let html = "";
+  for (let k = start; k < end; k++) {
+    const i = VLIST.order ? VLIST.order[k] : k;
+    const t = STATE.tracks[i];
+    if (t) html += rowHtml(t, i, k);
+  }
+  rowsEl.innerHTML = html;
+}
+
+function vlScheduleRender() {
+  if (VLIST.raf) return;
+  VLIST.raf = requestAnimationFrame(() => { VLIST.raf = 0; vlRenderWindow(); });
+}
+
+// One-time delegated events for every songrow that will ever render.
+function vlBindContainer() {
+  const body = $("browse-body");
+  body.addEventListener("click", (e) => {
+    const row = e.target.closest(".songrow"); if (!row) return;
     const idx = Number(row.dataset.idx);
-    row.onclick = (e) => {
-      const star = e.target.closest(".row-star");
-      if (star) { e.stopPropagation(); rateTrackByKey(idx, Number(star.dataset.star) * 2); return; }
-      if (e.shiftKey) selectRange(idx, e.metaKey || e.ctrlKey);
-      else selectRow(idx, e.metaKey || e.ctrlKey);
-    };
-    row.ondblclick = () => playIndex(idx);
-    row.oncontextmenu = (e) => showCtxMenu(e, idx);
-    if (STATE.view?.type !== "device") {
-      row.draggable = true;
-      row.ondragstart = (event) => {
-        if (!STATE.selected.has(row.dataset.rk)) selectRow(idx, false);
-        const keys = [...STATE.selected];
-        event.dataTransfer.effectAllowed = "copy";
-        event.dataTransfer.setData("application/x-iamped-tracks",
-                                   JSON.stringify(keys));
-        event.dataTransfer.setData("text/plain",
-                                   `${keys.length} iAmped track(s)`);
-        row.classList.add("dragging");
-      };
-      row.ondragend = () => row.classList.remove("dragging");
-    }
+    const star = e.target.closest(".row-star");
+    if (star) { e.stopPropagation(); rateTrackByKey(idx, Number(star.dataset.star) * 2); return; }
+    if (e.shiftKey) selectRange(idx, e.metaKey || e.ctrlKey);
+    else selectRow(idx, e.metaKey || e.ctrlKey);
+  });
+  body.addEventListener("dblclick", (e) => {
+    const row = e.target.closest(".songrow"); if (row) playIndex(Number(row.dataset.idx));
+  });
+  body.addEventListener("contextmenu", (e) => {
+    const row = e.target.closest(".songrow"); if (row) showCtxMenu(e, Number(row.dataset.idx));
+  });
+  body.addEventListener("dragstart", (e) => {
+    const row = e.target.closest(".songrow"); if (!row) return;
+    const idx = Number(row.dataset.idx);
+    if (!STATE.selected.has(row.dataset.rk)) selectRow(idx, false);
+    const keys = [...STATE.selected];
+    e.dataTransfer.effectAllowed = "copy";
+    e.dataTransfer.setData("application/x-iamped-tracks", JSON.stringify(keys));
+    e.dataTransfer.setData("text/plain", `${keys.length} iAmped track(s)`);
+    row.classList.add("dragging");
+  });
+  body.addEventListener("dragend", (e) => {
+    const row = e.target.closest(".songrow"); if (row) row.classList.remove("dragging");
   });
 }
 function renderAlbumHero(hero) {
@@ -1283,22 +1426,20 @@ function renderTracks() {
   renderAlbumHero(STATE.view?.hero);
   const body = $("browse-body");
   STATE.selAnchor = null;                // list rebuilt — old anchor is meaningless
-  body.innerHTML = STATE.tracks.map((t, i) => rowHtml(t, i)).join("");
-  bindRows([...body.querySelectorAll(".songrow")]);
-  updateDeviceMusicActions();
-  bottomBrowse();
+  VLIST.order = null;
+  body.innerHTML = '<div id="vl-top"></div><div id="vl-rows"></div><div id="vl-bottom"></div>';
+  body.scrollTop = 0;
   if (($("search").value || "").trim()
       && (STATE.view?.type === "device" || STATE.view?.type === "playlist"))
-    filterVisibleRows();
+    filterVisibleRows();                 // sets VLIST.order + renders the window
+  else vlRenderWindow();
+  updateDeviceMusicActions();
+  bottomBrowse();
 }
-// Append a page of rows WITHOUT rebuilding the list, so the scroll position is
-// preserved and the next page can be triggered by continued scrolling.
+// Fallback pagination only (catalog unavailable): STATE.tracks grew, so the
+// spacers re-derive the new total; scroll position is naturally preserved.
 function appendTracks(newOnes, startIdx) {
-  const body = $("browse-body");
-  const before = body.querySelectorAll(".songrow").length;
-  body.insertAdjacentHTML("beforeend",
-    newOnes.map((t, k) => rowHtml(t, startIdx + k)).join(""));
-  bindRows([...body.querySelectorAll(".songrow")].slice(before));
+  vlRenderWindow();
   bottomBrowse();
 }
 function _paintSelection() {
@@ -1529,7 +1670,7 @@ $("browse-head-row").querySelectorAll("[data-sort]").forEach((h) => {
     const key = h.dataset.sort;
     document.querySelectorAll("#browse-head-row [data-sort]").forEach((x) => x.classList.remove("sorted"));
     h.classList.add("sorted"); STATE.sort = key;
-    if (STATE.view?.type === "library") { STATE.offset = 0; STATE.tracks = []; loadMore(true); }
+    if (STATE.view?.type === "library") { refreshLibraryView(); }
     else { sortClient(key); renderTracks(); }
   };
 });
@@ -1545,9 +1686,12 @@ function sortClient(key) {
 }
 // infinite scroll
 $("browse-body").onscroll = (e) => {
+  vlScheduleRender();                    // no-op when another view owns the pane
   const el = e.target;
-  if (el.scrollTop + el.clientHeight > el.scrollHeight - 200) loadMore(false);
+  if (CATALOG.fallback && STATE.view?.type === "library"
+      && el.scrollTop + el.clientHeight > el.scrollHeight - 200) loadMore(false);
 };
+vlBindContainer();
 // search
 // The full song list stays paged, but this small grouped result set is drawn
 // from the local cache.  It makes search feel immediate without making a Plex
@@ -1637,7 +1781,11 @@ $("search").oninput = () => {
   const q = $("search").value.trim();
   if (!q) hideSearchResults();
   else suggestionTimer = setTimeout(updateSearchSuggestions, 90);
-  searchTimer = setTimeout(applySearch, 180);
+  // Local views filter in memory — synchronous, per keystroke, no debounce.
+  // Only the server-paged fallback still needs one.
+  const local = STATE.view?.type !== "library" || (CATALOG.rows && !CATALOG.fallback);
+  if (local) applySearch();
+  else searchTimer = setTimeout(applySearch, 180);
 };
 $("search").onfocus = () => {
   if ($("search").value.trim()) updateSearchSuggestions();
@@ -1665,23 +1813,29 @@ function applySearch() {
   const type = STATE.view?.type;
   if (type === "library") {
     STATE.search = $("search").value.trim();
-    STATE.offset = 0; STATE.tracks = []; loadMore(true);
+    refreshLibraryView();
   } else if (type === "facet") {
     renderFacetList(STATE.view.kind);
   } else if (type === "device" || type === "playlist") {
     filterVisibleRows();
   }
 }
-// Hide track rows that don't match the search term, keeping row indices intact
-// so selection/playback still line up with STATE.tracks.
+// Narrow the visible window order to rows matching the search term, keeping
+// row *indices* intact so selection/playback still line up with STATE.tracks.
 function filterVisibleRows() {
   const q = ($("search").value || "").trim().toLowerCase();
-  $("browse-body").querySelectorAll(".songrow").forEach((row) => {
-    const t = STATE.tracks[Number(row.dataset.idx)];
-    const hit = !q || !t || [t.title, t.artist, t.album]
-      .some((x) => (x || "").toLowerCase().includes(q));
-    row.classList.toggle("search-hidden", !hit);
-  });
+  if (!q) { VLIST.order = null; }
+  else {
+    const order = [];
+    for (let i = 0; i < STATE.tracks.length; i++) {
+      const t = STATE.tracks[i];
+      if ([t.title, t.artist, t.album].some((x) => (x || "").toLowerCase().includes(q)))
+        order.push(i);
+    }
+    VLIST.order = order;
+  }
+  $("browse-body").scrollTop = 0;
+  vlRenderWindow();
 }
 
 // ---------------------------------------------------------------- context menu
@@ -1949,6 +2103,7 @@ function advanceUiToQueuedNext(pos) {
   if (i < 0 || i >= STATE.tracks.length) return;
   if (STATE.playing >= 0 && STATE.playing !== i) STATE.playHistory.push(STATE.playing);
   STATE.playing = i;
+  vlScheduleRender();                    // move the ► marker in the window
   const t = STATE.tracks[i];
   STATE.scrobble = { session: STATE.scrobble.session + 1, posted: false };
   STATE.playbackOffset = 0;
@@ -1996,6 +2151,7 @@ async function playIndex(i, opts = {}) {
   if (!opts.fromHistory && STATE.playing >= 0 && STATE.playing !== i)
     STATE.playHistory.push(STATE.playing);
   STATE.playing = i;
+  vlScheduleRender();                    // move the ► marker in the window
   const t = STATE.tracks[i];
   STATE.scrobble = { session: STATE.scrobble.session + 1, posted: false };
   STATE.playbackOffset = 0;

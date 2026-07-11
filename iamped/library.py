@@ -426,6 +426,26 @@ END;
             "genres": grouped("genre"),
         }
 
+    # Columns the browse UI needs for every track. Kept lean on purpose: this
+    # is the payload of /api/catalog, which ships the whole library to the
+    # client in one shot (the iTunes-.itl model) so search/sort/filter run
+    # in-memory with no request per interaction.
+    CATALOG_COLS = (
+        "rating_key", "title", "artist", "album", "album_artist", "genre",
+        "year", "track_number", "disc_number", "duration_ms", "view_count",
+        "user_rating", "last_viewed_at", "container", "codec", "file_size",
+        "album_thumb",
+    )
+
+    def catalog_rows(self, source_id: str | None = None) -> list[dict]:
+        """Every track's browse-relevant fields, unordered (the client sorts)."""
+        where = " WHERE source_id=?" if source_id else ""
+        args = (source_id,) if source_id else ()
+        cols = ", ".join(self.CATALOG_COLS)
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                f"SELECT {cols} FROM tracks{where}", args).fetchall()]
+
     def facets(self, source_id: str | None = None) -> dict[str, list[dict]]:
         def rows_for(column: str, order: str) -> list[dict]:
             with self._conn() as c:

@@ -347,8 +347,13 @@ button.aqua:active { background: linear-gradient(#8fbef0, #5f9fe6); }
 #pane-browse.active { display: flex; flex-direction: column; height: 100%; }
 #pane-browse .songlist { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #browse-body { max-height: none; flex: 1; }
-.songrow { display: flex; min-height: 28px; font-size: 12.5px; color: #222; }
-.songrow:nth-child(odd) { background: #edf5fd; }
+/* Fixed height: the windowed list computes scroll geometry from it. Striping
+   is index-based (.odd) because only the visible slice exists in the DOM;
+   static wizard lists (sync preview, readback) keep nth-child striping. */
+.songrow { display: flex; height: 28px; box-sizing: border-box; align-items: center;
+  font-size: 12.5px; color: #222; }
+.songrow.odd { background: #edf5fd; }
+:not(#vl-rows) > .songrow:nth-child(odd) { background: #edf5fd; }
 .songrow div { padding: 5px 8px; border-right: 1px solid rgba(160,170,180,.2);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .c-num { width: 36px; color: #999; text-align: right; }

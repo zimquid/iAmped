@@ -1,11 +1,12 @@
 """Library catalog routes: provider-backed browsing, playlists, and radio."""
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import time
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from .. import config, filler, plex_client, providers
 from ..server import _lib, get_server, start_job
@@ -161,6 +162,39 @@ def _track_view(t: dict) -> dict:
         "size": t.get("file_size") or 0, "container": t.get("container"),
         "lossless": filler.is_lossless(t),
     }
+
+
+@bp.get("/api/catalog")
+def api_catalog():
+    """The whole cached library in one response (the iTunes-.itl model).
+
+    The client loads this once, precomputes search/sort keys, and serves every
+    browse interaction (search, sort, facet filter, scroll) from memory —
+    no request per keystroke. Gzipped when accepted: a 20k-track catalog is
+    ~5 MB raw, ~1 MB compressed.
+    """
+    rows = _lib().catalog_rows(_source_id())
+    tracks = [{
+        "rating_key": t["rating_key"], "title": t.get("title"),
+        "artist": t.get("artist"), "album": t.get("album"),
+        "album_artist": t.get("album_artist"), "genre": t.get("genre"),
+        "year": t.get("year"), "track_number": t.get("track_number"),
+        "disc_number": t.get("disc_number"),
+        "duration_ms": t.get("duration_ms") or 0,
+        "plays": t.get("view_count") or 0, "rating": t.get("user_rating"),
+        "last_viewed_at": t.get("last_viewed_at"),
+        "album_thumb": t.get("album_thumb"),
+        "size": t.get("file_size") or 0, "container": t.get("container"),
+        "lossless": filler.is_lossless(t),
+    } for t in rows]
+    payload = json.dumps({"total": len(tracks), "tracks": tracks},
+                         separators=(",", ":")).encode("utf-8")
+    if "gzip" in (request.headers.get("Accept-Encoding") or ""):
+        # Level 1: ~4x smaller at near-zero CPU — right trade for LAN/localhost.
+        return Response(gzip.compress(payload, compresslevel=1),
+                        mimetype="application/json",
+                        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+    return Response(payload, mimetype="application/json")
 
 
 @bp.get("/api/library/facets")
