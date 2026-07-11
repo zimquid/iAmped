@@ -220,23 +220,57 @@ def api_device_music_remove():
     return jsonify({"ok": True, **res})
 
 
+def _plex_music_sections(server) -> list[dict]:
+    """Music library sections with their Plex-side folder paths, each annotated
+    with whether that path is reachable/writable *from this machine*."""
+    out = []
+    for s in server.library.sections():
+        if s.type != "artist":
+            continue
+        folders = []
+        for loc in list(getattr(s, "locations", []) or []):
+            folders.append({
+                "path": loc,
+                "exists": os.path.isdir(loc),
+                "writable": os.path.isdir(loc) and os.access(loc, os.W_OK),
+            })
+        out.append({"title": s.title, "locations": [f["path"] for f in folders],
+                    "folders": folders})
+    return out
+
+
 @bp.get("/api/plex/music/locations")
 def api_plex_music_locations():
-    """Server-side folder paths for each music section, so the UI can hint which
-    folder Plex actually watches when picking an ingest destination."""
+    """Server-side folder paths for each music section, so the UI can offer the
+    folders Plex actually watches when picking an ingest destination — and flag
+    which of them this machine can reach and write to."""
     try:
         connection = providers.normalize(get_server())
         if connection.kind != "plex":
-            return jsonify({"sections": []})
-        server = connection.client
-        out = []
-        for s in server.library.sections():
-            if s.type == "artist":
-                out.append({"title": s.title,
-                            "locations": list(getattr(s, "locations", []) or [])})
-        return jsonify({"sections": out})
+            return jsonify({"sections": [], "supported": False})
+        cfg = config.load()
+        return jsonify({
+            "sections": _plex_music_sections(connection.client),
+            "supported": True,
+            "ingest_dir": cfg.get("ingest_dir") or "",
+            "ingest_section": cfg.get("ingest_section") or "",
+        })
     except Exception as exc:  # noqa: BLE001 - surfaced to UI
         return jsonify({"error": str(exc)}), 400
+
+
+@bp.post("/api/ingest/validate")
+def api_ingest_validate():
+    """Check a candidate ingest folder: reachable/writable here, and inside a
+    folder Plex actually watches. Used for live feedback as the user picks."""
+    ingest_dir = (request.json or {}).get("ingest_dir", "").strip()
+    try:
+        connection = providers.normalize(get_server())
+        sections = (_plex_music_sections(connection.client)
+                    if connection.kind == "plex" else [])
+    except Exception:  # noqa: BLE001 - validation is best-effort
+        sections = []
+    return jsonify(ingest.folder_status(ingest_dir, sections))
 
 
 @bp.post("/api/device/ingest/preview")

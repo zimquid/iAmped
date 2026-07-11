@@ -40,8 +40,8 @@ const BITRATE_PRESETS = {
 };
 const MAX_PLAYBACK_RECOVERIES = 8;
 
-async function api(path, method = "GET", body = null) {
-  const opt = { method, headers: { "Content-Type": "application/json" } };
+async function api(path, method = "GET", body = null, signal = null) {
+  const opt = { method, headers: { "Content-Type": "application/json" }, signal };
   if (body) opt.body = JSON.stringify(body);
   const r = await fetch(path, opt);
   const data = await r.json().catch(() => ({}));
@@ -67,7 +67,7 @@ const STATE = {
   selAnchor: null,     // last-clicked row index, anchors shift-click ranges
   sort: "artist",
   search: "",
-  offset: 0, total: 0, loading: false,
+  offset: 0, total: 0, loading: false, browseRequest: 0, browseAbort: null,
   playlists: [],
   facets: { artists: [], albums: [], genres: [] },
   playing: -1,
@@ -312,12 +312,12 @@ function setSourceKind(kind) {
   const isJellyfin = kind === "jellyfin";
   const isKodi = kind === "kodi";
   $("source-kind").value = kind;
-  $("server-heading").textContent = `${names[kind]} Server`;
+  $("server-heading").textContent = `Media Server — ${names[kind]}`;
   $("server-lead").textContent = isPlex
-    ? "Plexamp is only a client — iAmped reads your Plex music metadata and downloads audio directly to your device."
+    ? "iAmped works with Plex, Jellyfin, and Kodi. Connect to Plex directly — Plexamp is only a client."
     : isJellyfin
-      ? "Connect directly to your Jellyfin music library. iAmped reads metadata and downloads original audio for device sync."
-      : "Connect to Kodi's JSON-RPC music library. Sync requires Kodi to expose downloadable original music files.";
+      ? "iAmped works with Plex, Jellyfin, and Kodi. Connect directly to your Jellyfin music library for device sync."
+      : "iAmped works with Plex, Jellyfin, and Kodi. Connect to Kodi's JSON-RPC music library; it must expose original music files for sync.";
   $("plex-oauth-box").classList.toggle("hidden", !isPlex);
   $("login-row").classList.toggle("hidden", !(isJellyfin || isKodi));
   $("token-field").classList.toggle("hidden", isKodi);
@@ -364,7 +364,12 @@ async function loadConfig() {
   updateSdMenuState();
   STATE.autosyncEnabled = cfg.autosync_enabled !== false;
   updateAutosyncMenuState();
-  if ($("ingest-dir")) $("ingest-dir").value = cfg.ingest_dir || "";
+  if ($("ingest-dir")) {
+    $("ingest-dir").value = cfg.ingest_dir || "";
+    INGEST_SECTION = cfg.ingest_section || "";
+    loadIngestFolders();               // populate the Plex-folder dropdown
+    if (cfg.ingest_dir) validateIngest();  // show current folder's status
+  }
   for (const r of document.getElementsByName("dtype")) r.checked = r.value === (cfg.last_device_type || "massstorage");
   if ($("ipod-format")) $("ipod-format").value = cfg.ipod_format || "aac";
   applyAacQualityNote(cfg);
@@ -1167,8 +1172,19 @@ function openLibrary() {
   loadMore(true);
 }
 async function loadMore(reset) {
-  if (STATE.loading || STATE.view?.type !== "library") return;
+  if (STATE.view?.type !== "library") return;
   if (!reset && STATE.tracks.length >= STATE.total && STATE.total) return;
+  // A new query must win over an in-flight page from the previous query.  This
+  // is especially visible with quick typing on a large cached library.
+  if (reset) {
+    STATE.browseAbort?.abort();
+    STATE.loading = false;
+    STATE.browseRequest += 1;
+  }
+  if (STATE.loading) return;
+  const requestId = STATE.browseRequest || ++STATE.browseRequest;
+  const controller = new AbortController(); STATE.browseAbort = controller;
+  let fillMore = false;
   STATE.loading = true;
   const params = new URLSearchParams({
     search: STATE.search, sort: STATE.sort,
@@ -1178,17 +1194,26 @@ async function loadMore(reset) {
   if (STATE.view?.facetExtra) {
     Object.entries(STATE.view.facetExtra).forEach(([key, value]) => params.set(key, value));
   }
-  const r = await api(`/api/tracks?${params.toString()}`);
-  STATE.total = r.total; STATE.offset += r.tracks.length;
-  const start = reset ? 0 : STATE.tracks.length;
-  STATE.tracks = reset ? r.tracks : STATE.tracks.concat(r.tracks);
-  if (reset) renderTracks(); else appendTracks(r.tracks, start);
-  STATE.loading = false;
-  // If the first page didn't fill the viewport, keep pulling so the user can
-  // always scroll to reach the next page.
-  const body = $("browse-body");
-  if (STATE.tracks.length < STATE.total && body.scrollHeight <= body.clientHeight)
-    loadMore(false);
+  try {
+    const r = await api(`/api/tracks?${params.toString()}`, "GET", null, controller.signal);
+    if (requestId !== STATE.browseRequest) return;
+    STATE.total = r.total; STATE.offset += r.tracks.length;
+    const start = reset ? 0 : STATE.tracks.length;
+    STATE.tracks = reset ? r.tracks : STATE.tracks.concat(r.tracks);
+    if (reset) renderTracks(); else appendTracks(r.tracks, start);
+    // If the first page didn't fill the viewport, keep pulling so the user can
+    // always scroll to reach the next page.
+    const body = $("browse-body");
+    fillMore = STATE.tracks.length < STATE.total && body.scrollHeight <= body.clientHeight;
+  } catch (e) {
+    if (e.name !== "AbortError") throw e;
+  } finally {
+    if (requestId === STATE.browseRequest) {
+      STATE.loading = false;
+      if (STATE.browseAbort === controller) STATE.browseAbort = null;
+      if (fillMore) loadMore(false);
+    }
+  }
 }
 async function openPlaylist(el) {
   const id = el.dataset.id;
@@ -1419,17 +1444,82 @@ async function confirmIngest() {
     });
   } catch (e) { s.className = "status err"; s.textContent = e.message; $("ingest-confirm").disabled = false; }
 }
+// Section tied to the folder the user picked from the dropdown; empty for a
+// hand-typed custom path (the backend then falls back to the music section).
+let INGEST_SECTION = "";
+
+function paintIngestHint(status) {
+  const hint = $("ingest-dir-hint");
+  if (!hint) return null;
+  hint.textContent = status.message || "";
+  hint.style.color = status.ok ? "#1a7f37"
+    : status.writable ? "#9a6700"   // reachable but Plex may not watch it
+    : status.path ? "#b42318" : "";
+  return status;
+}
+
+// Ask the backend whether the current path is reachable/writable here and
+// inside a folder Plex watches. Debounced so typing doesn't spam the server.
+let _ingestValidateTimer = null;
+function validateIngestDebounced() {
+  clearTimeout(_ingestValidateTimer);
+  _ingestValidateTimer = setTimeout(validateIngest, 350);
+}
+async function validateIngest() {
+  const dir = $("ingest-dir").value.trim();
+  if (!dir) return paintIngestHint({ path: "", ok: false, writable: false, message: "" });
+  try {
+    return paintIngestHint(await api("/api/ingest/validate", "POST", { ingest_dir: dir }));
+  } catch (e) { return null; }
+}
+
+// Populate the dropdown from the folders Plex actually watches, flagging any
+// this machine can't reach or write to (usually a mount-path mismatch).
+async function loadIngestFolders() {
+  const sel = $("ingest-folder-select");
+  if (!sel) return;
+  let r;
+  try { r = await api("/api/plex/music/locations"); }
+  catch (e) { sel.style.display = "none"; return; }
+  if (!r.supported) { sel.style.display = "none"; return; }  // e.g. active source isn't Plex
+  sel.style.display = "";
+  const current = ($("ingest-dir").value || r.ingest_dir || "").trim();
+  const opts = ['<option value="">— pick a Plex library folder —</option>'];
+  for (const s of r.sections || []) {
+    for (const f of s.folders || []) {
+      const warn = f.writable ? "" : (f.exists ? "  (not writable here)" : "  (not reachable here)");
+      opts.push(`<option value="${esc(f.path)}" data-section="${esc(s.title)}"`
+        + (f.path === current ? " selected" : "") + ">"
+        + `${esc(s.title)} — ${esc(f.path)}${esc(warn)}</option>`);
+    }
+  }
+  opts.push('<option value="__custom__">Custom path…</option>');
+  sel.innerHTML = opts.join("");
+}
+
+function onIngestFolderPick() {
+  const sel = $("ingest-folder-select");
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || opt.value === "__custom__") { INGEST_SECTION = ""; $("ingest-dir").focus(); return; }
+  if (!opt.value) { INGEST_SECTION = ""; return; }
+  $("ingest-dir").value = opt.value;
+  INGEST_SECTION = opt.dataset.section || "";
+  validateIngest();
+}
+
 async function saveIngestDir() {
   const dir = $("ingest-dir").value.trim();
   try {
-    await api("/api/config", "POST", { ingest_dir: dir });
+    const status = await validateIngest();  // also repaints the hint
+    // Derive the section to rescan: the dropdown pick, or whatever Plex library
+    // the validator found this path inside; else leave blank (backend falls
+    // back to the configured music section).
+    const section = INGEST_SECTION || (status && status.watched_by) || "";
+    await api("/api/config", "POST", { ingest_dir: dir, ingest_section: section });
     const hint = $("ingest-dir-hint");
-    hint.textContent = "Saved.";
-    try {
-      const r = await api("/api/plex/music/locations");
-      const locs = (r.sections || []).flatMap((s) => s.locations);
-      if (locs.length) hint.textContent = "Saved. Plex watches: " + locs.join(", ");
-    } catch (e) {}
+    if (status && status.ok) hint.textContent = "Saved — " + status.message;
+    else if (status) hint.textContent = "Saved, but heads up: " + status.message;
+    else hint.textContent = "Saved.";
   } catch (e) { alert(e.message); }
 }
 
@@ -1459,11 +1549,115 @@ $("browse-body").onscroll = (e) => {
   if (el.scrollTop + el.clientHeight > el.scrollHeight - 200) loadMore(false);
 };
 // search
-let searchTimer;
+// The full song list stays paged, but this small grouped result set is drawn
+// from the local cache.  It makes search feel immediate without making a Plex
+// request for every keypress.
+let searchTimer, suggestionTimer, suggestionAbort, suggestionRequest = 0;
+let searchResultItems = [], searchResultIndex = -1;
+function hideSearchResults() {
+  searchResultItems = []; searchResultIndex = -1;
+  $("search-results").classList.add("hidden");
+  $("search").setAttribute("aria-expanded", "false");
+}
+function renderSearchResults(results) {
+  const groups = [
+    { key: "artists", label: "Artists", icon: "●",
+      sub: (x) => plural(x.count, "song") },
+    { key: "albums", label: "Albums", icon: "▣",
+      sub: (x) => [x.artist, x.year].filter(Boolean).join(" · ") || plural(x.count, "song") },
+    { key: "tracks", label: "Songs", icon: "♪",
+      sub: (x) => [x.artist, x.album].filter(Boolean).join(" · ") },
+    { key: "genres", label: "Genres", icon: "#",
+      sub: (x) => plural(x.count, "song") },
+  ];
+  searchResultItems = [];
+  const html = groups.map((group) => {
+    const items = results[group.key] || [];
+    if (!items.length) return "";
+    const rows = items.map((item) => {
+      const index = searchResultItems.length;
+      searchResultItems.push({ kind: group.key, item });
+      return `<button class="search-result" type="button" role="option" aria-selected="false" data-i="${index}">
+        <span class="search-result-icon">${group.icon}</span><span><div class="search-result-main">${esc(item.name || item.title)}</div>
+        <div class="search-result-sub">${esc(group.sub(item))}</div></span></button>`;
+    }).join("");
+    return `<div class="search-group-label">${group.label}</div>${rows}`;
+  }).join("");
+  if (!searchResultItems.length) return hideSearchResults();
+  const box = $("search-results");
+  box.innerHTML = html;
+  box.querySelectorAll(".search-result").forEach((row) => {
+    row.onclick = () => chooseSearchResult(Number(row.dataset.i));
+  });
+  box.classList.remove("hidden");
+  $("search").setAttribute("aria-expanded", "true");
+}
+async function updateSearchSuggestions() {
+  const q = $("search").value.trim();
+  if (!q) return hideSearchResults();
+  suggestionAbort?.abort();
+  const controller = new AbortController(); suggestionAbort = controller;
+  const requestId = ++suggestionRequest;
+  try {
+    const results = await api(`/api/library/search?q=${encodeURIComponent(q)}&limit=6`, "GET", null, controller.signal);
+    if (requestId === suggestionRequest && $("search").value.trim() === q) renderSearchResults(results);
+  } catch (e) {
+    // Aborting an obsolete request is normal while typing.  Leave the last
+    // useful result visible for real transient failures instead of flashing.
+    if (e.name !== "AbortError" && requestId === suggestionRequest) hideSearchResults();
+  }
+}
+function paintSearchResultSelection() {
+  $("search-results").querySelectorAll(".search-result").forEach((row, index) => {
+    const active = index === searchResultIndex;
+    row.classList.toggle("active", active); row.setAttribute("aria-selected", String(active));
+    if (active) row.scrollIntoView({ block: "nearest" });
+  });
+}
+function chooseSearchResult(index) {
+  const result = searchResultItems[index];
+  if (!result) return;
+  hideSearchResults();
+  const { kind, item } = result;
+  if (kind === "artists") return openFacetTracks("artists", item);
+  if (kind === "albums") return openFacetTracks("albums", item);
+  if (kind === "genres") return openFacetTracks("genres", item);
+  // A song result opens its cached matches in the normal browser.  Keeping
+  // playback explicit avoids replacing the current queue on an Enter key.
+  $("search").value = item.title || "";
+  selectPane("pane-browse", $("src-music"));
+  STATE.view = { type: "library", title: item.title || "Music" };
+  $("browse-title").textContent = STATE.view.title;
+  STATE.search = $("search").value.trim(); STATE.offset = 0; STATE.total = 0;
+  STATE.tracks = []; $("browse-body").innerHTML = "";
+  loadMore(true);
+}
 $("search").oninput = () => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(applySearch, 300);
+  clearTimeout(searchTimer); clearTimeout(suggestionTimer);
+  const q = $("search").value.trim();
+  if (!q) hideSearchResults();
+  else suggestionTimer = setTimeout(updateSearchSuggestions, 90);
+  searchTimer = setTimeout(applySearch, 180);
 };
+$("search").onfocus = () => {
+  if ($("search").value.trim()) updateSearchSuggestions();
+};
+$("search").onkeydown = (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (!searchResultItems.length) return;
+    e.preventDefault();
+    const delta = e.key === "ArrowDown" ? 1 : -1;
+    searchResultIndex = (searchResultIndex + delta + searchResultItems.length) % searchResultItems.length;
+    paintSearchResultSelection();
+  } else if (e.key === "Enter" && searchResultIndex >= 0) {
+    e.preventDefault(); chooseSearchResult(searchResultIndex);
+  } else if (e.key === "Escape") {
+    e.preventDefault(); hideSearchResults();
+  }
+};
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search")) hideSearchResults();
+});
 // Route the search box to whatever the current view is showing. The library is
 // searched server-side (it's paged); everything else is already fully loaded in
 // memory, so we filter it client-side rather than only the rows in view.
@@ -2891,6 +3085,8 @@ $("btn-reclaim").onclick = reclaimOther;
 $("btn-dm-select-foreign").onclick = selectForeignDeviceTracks;
 $("btn-dm-ingest").onclick = ingestSelectedDeviceMusic;
 $("btn-save-ingest").onclick = saveIngestDir;
+if ($("ingest-folder-select")) $("ingest-folder-select").onchange = onIngestFolderPick;
+if ($("ingest-dir")) $("ingest-dir").oninput = validateIngestDebounced;
 $("ingest-cancel").onclick = closeIngest;
 $("ingest-confirm").onclick = confirmIngest;
 $("src-music").onclick = openLibrary;

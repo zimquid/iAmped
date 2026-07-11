@@ -49,7 +49,7 @@
       <div class="lcd-stage">
         <div class="lcd-copy" id="lcd-copy" role="button" tabindex="0" aria-label="Show current playback">
           <div class="lcd-main" id="lcd-main">iAmped</div>
-          <div class="lcd-sub" id="lcd-sub">Plexamp metadata → iPod &amp; MP3 players</div>
+          <div class="lcd-sub" id="lcd-sub">Music server metadata → iPod &amp; MP3 players</div>
           <div class="lcd-progrow hidden" id="lcd-progrow">
             <span class="lcd-time" id="lcd-elapsed">0:00</span>
             <div class="lcd-prog" id="lcd-prog"><div></div></div>
@@ -63,7 +63,10 @@
     </div>
     <div class="search">
       <svg viewBox="0 0 16 16"><path d="M6.5 1a5.5 5.5 0 014.2 9l4.1 4.1-1.4 1.4-4.1-4.1A5.5 5.5 0 116.5 1zm0 2a3.5 3.5 0 100 7 3.5 3.5 0 000-7z"/></svg>
-      <input type="text" id="search" placeholder="Search">
+      <input type="search" id="search" placeholder="Search your cached library" autocomplete="off"
+        aria-label="Search your cached library" aria-autocomplete="list" aria-expanded="false"
+        aria-controls="search-results">
+      <div id="search-results" class="search-results hidden" role="listbox"></div>
     </div>
   </div>
 
@@ -97,7 +100,7 @@
 
     <div class="content">
 
-      <!-- PLEX SERVER / SETUP -->
+      <!-- MEDIA SERVER / SETUP -->
       <div class="pane active" id="pane-plex">
         <h2 id="server-heading">Media Server</h2>
         <p class="lead" id="server-lead">Choose a self-hosted media server. iAmped reads its music metadata and downloads the original audio directly to your device.</p>
@@ -142,7 +145,7 @@
         </div>
         <hr style="border:0; border-top:1px solid #e3e3e3; margin:18px 0;">
         <h2 style="font-size:14px;">Local library cache</h2>
-        <p class="lead">Cache metadata + playlists so you can browse, build playlists and fill devices without re-querying Plex each time.</p>
+        <p class="lead">Cache metadata + playlists so you can browse, build playlists and fill devices without re-querying your server each time.</p>
         <button id="btn-build" disabled>Build / refresh library</button>
         <div class="status" id="build-status"></div>
         <div class="stats" id="lib-stats" style="margin-top:14px;"></div>
@@ -390,8 +393,15 @@
               </div>
               <div>
                 <b>Ingest folder</b>
-                <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
-                <button id="btn-save-ingest">Save</button>
+                <div style="margin-top:4px;">
+                  <select id="ingest-folder-select" style="min-width:320px;" title="Folders your Plex server actually watches">
+                    <option value="">Loading Plex library folders…</option>
+                  </select>
+                </div>
+                <div style="margin-top:4px;">
+                  <input type="text" id="ingest-dir" placeholder="/path Plex watches (e.g. /Volumes/Media/Music)" style="min-width:280px;">
+                  <button id="btn-save-ingest">Save</button>
+                </div>
                 <div class="muted" id="ingest-dir-hint" style="font-size:11px; margin-top:4px;"></div>
               </div>
             </div>

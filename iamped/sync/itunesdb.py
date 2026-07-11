@@ -1,13 +1,23 @@
 """Write a classic iPod ``iTunesDB`` from scratch (pure Python).
 
-This targets the *non-hashed* iTunesDB format used by the click-wheel iPods:
-iPod 1G–5.5G (incl. iPod Video), iPod mini, and iPod nano 1G–3G. Those models
-do not verify the database, so a correctly-structured hand-written DB mounts and
-plays.
+This writes the iTunesDB used by the click-wheel iPods. Two model families are
+handled:
 
-NOT supported: iPod Classic 6G/7G and nano 6G+. Those require Apple's
-proprietary ``hashAB`` checksum (never fully reverse-engineered). For them, use
-the mass-storage backend together with Rockbox firmware.
+* *Unsigned* — iPod 1G–5.5G (incl. iPod Video), iPod mini, and iPod nano 1G–2G
+  do not verify the database, so a correctly-structured hand-written DB mounts
+  and plays as-is.
+* *HASH58-signed* — iPod Classic (6G/6.5G/7G) and iPod nano 3G/4G authenticate
+  the database with libgpod's ``hash58`` FireWire-GUID HMAC (see ``hash58.py``).
+  These are supported: when the device already carries a signed DB (mhbd header
+  ``>= 0xF4`` with ``hashing_scheme == 1``) and its FireWire GUID can be
+  resolved, the DB we write is re-signed so it mounts. Note the scheme is read
+  from the *on-device* DB, not the model, so a freshly wiped Classic with no
+  signed DB present is not yet auto-detected — sync once from iTunes (or restore
+  a snapshot) so a signed DB exists, then sync with iAmped.
+
+Still NOT supported here: iPod nano 5G (``hash72``) and nano 6G/7G (``hashAB``
+white-box AES). For those, use the mass-storage backend with Rockbox firmware —
+or wire up the public-domain ``dstaley/hashab`` module (see ``hashab`` notes).
 
 Layout written to the device::
 

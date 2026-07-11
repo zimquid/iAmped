@@ -356,6 +356,76 @@ END;
                 params + [int(limit), int(offset)]).fetchall()
         return {"total": total, "tracks": [dict(r) for r in rows]}
 
+    def search_suggestions(self, search: str, source_id: str | None = None,
+                           limit: int = 6) -> dict[str, list[dict]]:
+        """Return a small, grouped set of cached-library typeahead results.
+
+        This deliberately queries the local catalog rather than Plex.  The
+        results therefore appear immediately while a person is typing, even
+        when the server is unavailable.  FTS5 makes prefix matching practical
+        for large libraries; the LIKE path keeps the feature usable on SQLite
+        builds where FTS5 is not present.
+        """
+        search = (search or "").strip()
+        empty = {"tracks": [], "artists": [], "albums": [], "genres": []}
+        if not search:
+            return empty
+        limit = max(1, min(int(limit), 20))
+        source_where = " AND t.source_id=?" if source_id else ""
+        source_args = [source_id] if source_id else []
+
+        def match(column: str | None = None) -> tuple[str, list[str]]:
+            if getattr(self, "_fts", False) and column in (None, "title", "artist", "album"):
+                if column:
+                    terms = [term.replace('"', '""') for term in search.split() if term]
+                    fts = " AND ".join(f'{column} : "{term}"*' for term in terms)
+                else:
+                    fts = self._fts_query(search)
+                return ("t.rowid IN (SELECT rowid FROM tracks_fts "
+                        "WHERE tracks_fts MATCH ?)", [fts])
+            field = column or "title || ' ' || artist || ' ' || album"
+            return (f"{field} LIKE ? COLLATE NOCASE", [f"%{search}%"])
+
+        def grouped(column: str, extra: str = "", group_by: str = "") -> list[dict]:
+            clause, params = match(column)
+            select_extra = f", {extra}" if extra else ""
+            with self._conn() as c:
+                return [dict(row) for row in c.execute(
+                    f"SELECT t.{column} name, COUNT(*) count{select_extra} "
+                    f"FROM tracks t WHERE COALESCE(t.{column}, '') != '' "
+                    f"AND {clause}{source_where} "
+                    f"GROUP BY {group_by or f't.{column} COLLATE NOCASE'} "
+                    f"ORDER BY CASE WHEN t.{column} LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END, "
+                    f"t.{column} COLLATE NOCASE LIMIT ?",
+                    params + source_args + [f"{search}%", limit]).fetchall()]
+
+        track_clause, track_params = match()
+        with self._conn() as c:
+            tracks = [dict(row) for row in c.execute(
+                "SELECT t.rating_key, t.title, t.artist, t.album, t.album_artist, "
+                "t.genre, t.year, t.album_thumb, t.duration_ms, t.view_count, "
+                "t.user_rating, t.file_size, t.container "
+                f"FROM tracks t WHERE {track_clause}{source_where} "
+                "ORDER BY CASE "
+                "WHEN t.title = ? COLLATE NOCASE THEN 0 "
+                "WHEN t.title LIKE ? COLLATE NOCASE THEN 1 "
+                "WHEN t.artist LIKE ? COLLATE NOCASE THEN 2 "
+                "WHEN t.album LIKE ? COLLATE NOCASE THEN 3 ELSE 4 END, "
+                "t.title COLLATE NOCASE LIMIT ?",
+                track_params + source_args + [search, f"{search}%", f"{search}%",
+                                                f"{search}%", limit]).fetchall()]
+        # Album artist is included so choosing a same-named album opens the
+        # correct cached release rather than every album sharing that title.
+        albums = grouped("album", "t.album_artist artist, MIN(t.year) year, "
+                         "MIN(t.album_thumb) album_thumb",
+                         "t.album COLLATE NOCASE, t.album_artist COLLATE NOCASE")
+        return {
+            "tracks": tracks,
+            "artists": grouped("artist", "MAX(NULLIF(t.artist_thumb, '')) album_thumb"),
+            "albums": albums,
+            "genres": grouped("genre"),
+        }
+
     def facets(self, source_id: str | None = None) -> dict[str, list[dict]]:
         def rows_for(column: str, order: str) -> list[dict]:
             with self._conn() as c:
