@@ -1,6 +1,8 @@
-plexapi>=4.15
-flask>=3.0
-pywebview>=5.0
-requests>=2.31
-Pillow>=10.0
-mutagen>=1.47
+# Upper bounds keep release builds off untested major versions; bump them
+# deliberately after running the test suite against the new release.
+plexapi>=4.15,<5
+flask>=3.0,<4
+pywebview>=5.0,<7
+requests>=2.31,<3
+Pillow>=10.0,<14
+mutagen>=1.47,<2

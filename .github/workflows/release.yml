@@ -6,7 +6,7 @@ name: Release
 #   Windows -> iAmped-Windows.exe (single self-contained executable)
 #
 # Trigger either way:
-#   * push a version tag        ->  git tag v1.01 && git push origin v1.01
+#   * push a version tag        ->  git tag v1.0.1 && git push origin v1.0.1
 #   * or run it from the Actions tab (workflow_dispatch) with a tag input.
 
 on:
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build/publish (e.g. v1.01)"
+        description: "Release tag to build/publish (e.g. v1.0.1)"
         required: true
 
 permissions:
@@ -27,9 +27,14 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  # Never publish a build that fails the test suite.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
   # Create the release once, up front, so the parallel build jobs only ever
   # upload assets (no race creating the same release twice).
   create-release:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,15 +43,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="$RELEASE_TAG"
-          TITLE="${TAG#v}"   # "v1.01" -> "1.01"
+          TITLE="${TAG#v}"   # "v1.0.1" -> "1.0.1"
+          # The tag must match iamped.__version__ so the app, the macOS bundle
+          # and the release page all report the same version.
+          APP_VERSION=$(python3 -c "import re;print(re.search(r'^__version__ = \"([^\"]+)\"', open('iamped/__init__.py').read(), re.M).group(1))")
+          if [ "$APP_VERSION" != "$TITLE" ]; then
+            echo "::error::Tag $TAG does not match iamped.__version__ ($APP_VERSION)."
+            exit 1
+          fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists — reusing it."
           else
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --target main \
+              --target "$GITHUB_SHA" \
               --title "$TITLE" \
-              --notes "iAmped $TITLE — portable build. Download the macOS .app (zip) or the Windows .exe below."
+              --generate-notes \
+              --notes "iAmped $TITLE — portable build. Download the macOS .app (zip) or the Windows .exe below. The builds are not code-signed; see the README section *First launch of an unsigned build*."
           fi
 
   build:

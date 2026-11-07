@@ -137,12 +137,30 @@ def load() -> dict[str, Any]:
     return _normalize_sources(cfg)
 
 
+def _write_private_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write a JSON file readable only by the current user.
+
+    config.json holds server tokens/passwords: a crash mid-write must not leave
+    it truncated, and other local accounts must not be able to read it. (POSIX
+    permissions; on Windows/FAT the chmod is a harmless no-op.)
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
 def save(updates: dict[str, Any]) -> dict[str, Any]:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     cfg = load()
     cfg.update({k: v for k, v in updates.items() if k in DEFAULTS})
     cfg = _normalize_sources(cfg)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    _write_private_json(CONFIG_PATH, cfg)
     _mirror_credentials(cfg)
     return cfg
 
@@ -242,7 +260,7 @@ def _mirror_credentials(cfg: dict[str, Any]) -> None:
     creds = {key: cfg.get(key, "") for key in LOGIN_KEYS}
     try:
         STABLE_DIR.mkdir(parents=True, exist_ok=True)
-        CRED_PATH.write_text(json.dumps(creds, indent=2))
+        _write_private_json(CRED_PATH, creds)
     except OSError:
         pass
 

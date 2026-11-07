@@ -10,12 +10,15 @@
 # collected wholesale because pywebview and plexapi load backends dynamically.
 #
 # Build:  pyinstaller --noconfirm build_tools/iamped.spec
-import os, sys
+import os, re, sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 IS_MAC = sys.platform == "darwin"
 
 ROOT = os.path.abspath(os.getcwd())
+
+with open(os.path.join(ROOT, "iamped", "__init__.py"), encoding="utf-8") as fh:
+    VERSION = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M).group(1)
 
 # Bundle the SPA at iamped/web so server.py's WEB_DIR resolves inside the app.
 datas = [(os.path.join(ROOT, "iamped", "web"), os.path.join("iamped", "web"))]
@@ -58,7 +61,8 @@ if IS_MAC:
         info_plist={
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
-            "CFBundleShortVersionString": "1.0.1",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
         },
     )
 else:

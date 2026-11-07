@@ -1,7 +1,6 @@
 """Playback control, artwork proxy, and audio streaming routes."""
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 

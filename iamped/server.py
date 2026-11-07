@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import traceback
 import uuid
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import cache, config, playback, providers
+from . import __version__, cache, config, playback, providers
 from .library import Library
 from .sync.base import aac_codec, have_ffmpeg, is_apple_grade_aac
 
@@ -20,6 +22,47 @@ app = Flask(__name__, static_folder=None)
 
 _state: dict = {"server": None, "source_id": None}
 JOBS: dict[str, dict] = {}
+# Finished jobs are kept this long so the UI can collect their result, then
+# pruned so a long-running session doesn't accumulate every job forever.
+_JOB_TTL_S = 3600
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _hostname(hostport: str) -> str:
+    """Host part of a ``Host`` header value (``"127.0.0.1:5000"`` → ``"127.0.0.1"``)."""
+    hostport = (hostport or "").strip().lower()
+    if hostport.startswith("["):
+        return hostport.split("]", 1)[0] + "]"
+    return hostport.rsplit(":", 1)[0] if hostport.count(":") == 1 else hostport
+
+
+@app.before_request
+def _local_only():
+    """The API is unauthenticated and can read device/local files, so only the
+    app's own page may talk to it.
+
+    * The ``Host`` header must be a loopback name — defeats DNS rebinding, where
+      a remote page re-points its own hostname at 127.0.0.1.
+    * Browser requests from any other site are refused, judged by
+      ``Sec-Fetch-Site`` where the engine sends it (Chromium/WebView2, WebKit,
+      Firefox) and by ``Origin`` otherwise. Non-browser clients send neither and
+      can already reach loopback directly, so they are unaffected.
+    """
+    if _hostname(request.host) not in _LOOPBACK_HOSTS:
+        return jsonify({"error": "forbidden host"}), 403
+    site = request.headers.get("Sec-Fetch-Site")
+    if site is not None:
+        if site not in ("same-origin", "none"):
+            return jsonify({"error": "cross-site request refused"}), 403
+        return None
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        parts = urlsplit(origin)
+        if (parts.scheme not in ("http", "https")
+                or parts.netloc.lower() != request.host.lower()):
+            return jsonify({"error": "cross-origin request refused"}), 403
+    return None
 
 
 # --------------------------------------------------------------------------- helpers
@@ -38,7 +81,15 @@ def get_server():
     return _state["server"]
 
 
+def _prune_jobs(now: float) -> None:
+    for jid, job in list(JOBS.items()):
+        ended = job.get("ended_at")
+        if job.get("status") != "running" and ended and now - ended > _JOB_TTL_S:
+            JOBS.pop(jid, None)
+
+
 def start_job(target, *args) -> str:
+    _prune_jobs(time.time())
     jid = uuid.uuid4().hex[:12]
     job = {"status": "running", "phase": "starting", "done": 0, "total": 0,
            "message": "", "result": None, "error": None, "code": None,
@@ -58,6 +109,8 @@ def start_job(target, *args) -> str:
             job["detail"] = {"completed": getattr(exc, "completed", None)} \
                 if getattr(exc, "code", None) else None
             job["trace"] = traceback.format_exc()
+        finally:
+            job["ended_at"] = time.time()
     threading.Thread(target=runner, daemon=True).start()
     return jid
 
@@ -99,6 +152,7 @@ def api_get_config():
     cfg["aac_encoder"] = aac_codec()
     cfg["aac_apple_grade"] = is_apple_grade_aac()
     cfg["cache_status"] = cache.status()
+    cfg["version"] = __version__
     return jsonify(cfg)
 
 
