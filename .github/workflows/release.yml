@@ -59,7 +59,7 @@ jobs:
               --target "$GITHUB_SHA" \
               --title "$TITLE" \
               --generate-notes \
-              --notes "iAmped $TITLE — portable build. Download the macOS .app (zip) or the Windows .exe below. The builds are not code-signed; see the README section *First launch of an unsigned build*."
+              --notes "iAmped $TITLE — portable build. Download the macOS .app (zip) or the Windows .exe below. The builds are not code-signed; see the README section *First launch of an unsigned build*. Licensed GPL-3.0-or-later; complete source for this build: https://github.com/$GITHUB_REPOSITORY/tree/$TAG"
           fi
 
   build:

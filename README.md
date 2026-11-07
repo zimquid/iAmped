@@ -217,3 +217,10 @@ iamped/
   app.py             desktop window (pywebview) launcher
   web/               single-page UI
 ```
+
+## License
+
+iAmped is free software: you can redistribute it and/or modify it under the
+terms of the **GNU General Public License v3.0 or later** — see
+[`LICENSE`](LICENSE). Bundled third-party components keep their own licenses;
+see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

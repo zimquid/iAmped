@@ -22,6 +22,9 @@ with open(os.path.join(ROOT, "iamped", "__init__.py"), encoding="utf-8") as fh:
 
 # Bundle the SPA at iamped/web so server.py's WEB_DIR resolves inside the app.
 datas = [(os.path.join(ROOT, "iamped", "web"), os.path.join("iamped", "web"))]
+# Ship the license and third-party notices inside the app, as GPL requires.
+datas += [(os.path.join(ROOT, "LICENSE"), "."),
+          (os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), ".")]
 binaries = []
 hiddenimports = collect_submodules("iamped")
 
