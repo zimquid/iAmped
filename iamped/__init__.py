@@ -10,4 +10,4 @@ Licensed under the GNU General Public License v3.0 or later; see LICENSE.
 
 # Single source of truth for the app version: the PyInstaller spec reads it for
 # the macOS bundle, and /api/config reports it to the UI.
-__version__ = "1.0.1"
+__version__ = "1.03"

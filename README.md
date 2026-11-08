@@ -157,7 +157,7 @@ The version lives in one place, `iamped/__init__.py` (`__version__`). To cut a
 release, bump it, merge to `main`, then push a matching tag:
 
 ```bash
-git tag v1.0.1 && git push origin v1.0.1
+git tag v1.03 && git push origin v1.03
 ```
 
 The Release workflow runs the test suite on Linux/macOS/Windows, refuses tags
