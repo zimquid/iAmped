@@ -141,6 +141,37 @@ and downloaded audio are stored in an `iAmped-data/` folder created **next to
 the app** on first run — so you can drop the app on a USB stick and carry your
 configuration with it.
 
+### First launch of an unsigned build
+
+Release builds are not code-signed or notarized yet, so the OS will warn on
+first launch:
+
+- **macOS** — right-click `iAmped.app` → **Open**, then confirm. If macOS says
+  the app is "damaged", run `xattr -dr com.apple.quarantine iAmped.app` once.
+- **Windows** — SmartScreen shows "Windows protected your PC"; click
+  **More info → Run anyway**.
+
+### Releasing
+
+The version lives in one place, `iamped/__init__.py` (`__version__`). To cut a
+release, bump it, merge to `main`, then push a matching tag:
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+The Release workflow runs the test suite on Linux/macOS/Windows, refuses tags
+that don't match `__version__`, then builds and attaches the macOS and Windows
+artifacts.
+
+### Security model
+
+iAmped's backend listens on `127.0.0.1` only and has no login, so it refuses
+any request whose `Host` isn't a loopback name (DNS rebinding) and any browser
+request coming from another site. Saved server tokens and passwords are kept in
+`config.json` in the data directory and never sent to the UI — protect that
+folder (and a portable USB stick carrying it) like a password.
+
 ### Where settings are stored
 
 | How you run it | Data directory |
@@ -186,3 +217,10 @@ iamped/
   app.py             desktop window (pywebview) launcher
   web/               single-page UI
 ```
+
+## License
+
+iAmped is free software: you can redistribute it and/or modify it under the
+terms of the **GNU General Public License v3.0 or later** — see
+[`LICENSE`](LICENSE). Bundled third-party components keep their own licenses;
+see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
