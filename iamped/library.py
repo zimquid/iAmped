@@ -157,6 +157,13 @@ END;
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # WAL is set persistently at init; these are per-connection tuning
+        # knobs. NORMAL is durable-enough under WAL (a crash can lose the
+        # last transaction, never corrupt), and matters on spinning disks.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-8000")      # 8 MB page cache
+        conn.execute("PRAGMA mmap_size=134217728")   # 128 MB, no-op if unsupported
+        conn.execute("PRAGMA temp_store=MEMORY")
         try:
             yield conn
             conn.commit()
@@ -425,6 +432,26 @@ END;
             "albums": albums,
             "genres": grouped("genre"),
         }
+
+    # Columns the browse UI needs for every track. Kept lean on purpose: this
+    # is the payload of /api/catalog, which ships the whole library to the
+    # client in one shot (the iTunes-.itl model) so search/sort/filter run
+    # in-memory with no request per interaction.
+    CATALOG_COLS = (
+        "rating_key", "title", "artist", "album", "album_artist", "genre",
+        "year", "track_number", "disc_number", "duration_ms", "view_count",
+        "user_rating", "last_viewed_at", "container", "codec", "file_size",
+        "album_thumb",
+    )
+
+    def catalog_rows(self, source_id: str | None = None) -> list[dict]:
+        """Every track's browse-relevant fields, unordered (the client sorts)."""
+        where = " WHERE source_id=?" if source_id else ""
+        args = (source_id,) if source_id else ()
+        cols = ", ".join(self.CATALOG_COLS)
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                f"SELECT {cols} FROM tracks{where}", args).fetchall()]
 
     def facets(self, source_id: str | None = None) -> dict[str, list[dict]]:
         def rows_for(column: str, order: str) -> list[dict]:
