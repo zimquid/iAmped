@@ -16,7 +16,7 @@ const fmtTotal = (ms) => {
   return `${(h / 24).toFixed(1)} days`;
 };
 const stars = (r) => r ? "★".repeat(Math.round(r / 2)) : "";
-const esc = (s) => (s || "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[<>&"']/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" }[c]));
 // Deterministic placeholder artwork: a stable hue from the text + a centred glyph,
 // so albums/artists without cached art still read as distinct tiles.
 const artHue = (s) => { let h = 0; for (const c of String(s || "")) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
