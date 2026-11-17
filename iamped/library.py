@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_views ON tracks(view_count DESC);
 CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(user_rating DESC);
-CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source_id);
 """
 
 BROWSE_ORDER = {
@@ -101,6 +100,9 @@ class Library:
             existing_local = {r["name"] for r in c.execute("PRAGMA table_info(local_playlists)")}
             if "source_id" not in existing_local:
                 c.execute("ALTER TABLE local_playlists ADD COLUMN source_id TEXT DEFAULT 'plex'")
+            # Indexes on migrated columns must come after the ALTERs above: a
+            # pre-source_id database would otherwise fail to open at all.
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(source_id)")
             self._fts = self._ensure_fts(c)
 
     @staticmethod
